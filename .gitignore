@@ -1,0 +1,79 @@
+# Build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+*.dylib
+moc_*
+qrc_*
+ui_*
+*_autogen/
+
+# Binaries
+AnimoServer
+AnimoClient
+*.exe
+
+# Runtime data (databases, logs, session history)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+error.log
+error.log.*
+
+# Session persistence files (contain encrypted tokens)
+*.animosession
+*.animosessions
+
+
+# Documentation (keep internal, not in repo)
+docs/
+
+# Internal development notes
+IMPROVEMENTS.md
+LOGGING_IMPROVEMENTS.md
+TESTING_NOTES.md
+CHANGELOG.md
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+*.creator
+*.creator.user
+*.user
+compile_commands.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Temporary files
+*.tmp
+*.bak
+*.orig

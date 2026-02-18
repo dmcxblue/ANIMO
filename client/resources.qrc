@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/">
+		<file>icons/appicon.png</file>
+		<file>icons/azure_cloud.svg</file>
+		<file>icons/shareicons/folder.png</file>
+        <file>icons/shareicons/txt_file.png</file>
+        <file>icons/shareicons/image_file.png</file>
+        <file>icons/shareicons/pdf_file.png</file>
+        <file>icons/shareicons/zip_file.png</file>
+		<file>icons/shareicons/clip.png</file>
+    </qresource>
+</RCC>
