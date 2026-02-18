@@ -1,27 +1,37 @@
-# ANIMO
 
-**Azure Network Intel & Mission Ops**
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Azure%20%7C%20M365-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white" />
+  <img src="https://img.shields.io/badge/C++-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white" />
+  <img src="https://img.shields.io/badge/Qt-6.x-41CD52?style=for-the-badge&logo=qt&logoColor=white" />
+  <img src="https://img.shields.io/badge/License-Private-red?style=for-the-badge" />
+</p>
 
-A comprehensive client-server platform for Azure and Microsoft 365 security assessment, designed for authorized penetration testing, red team operations, and security research.
+<h1 align="center">ANIMO</h1>
+<h3 align="center">Azure Network Intel & Mission Ops</h3>
 
-![Qt6](https://img.shields.io/badge/Qt-6.x-green.svg)
-![C++17](https://img.shields.io/badge/C++-17-blue.svg)
-![License](https://img.shields.io/badge/License-Private-red.svg)
+<p align="center">
+  <i>A unified client-server platform for Azure & Microsoft 365 security assessment</i>
+</p>
+
+<p align="center">
+  <b>Designed for authorized penetration testing, red team operations, and security research.</b>
+</p>
 
 ---
 
-## Overview
+## What is ANIMO?
 
-ANIMO provides a unified interface for Azure AD/Entra ID reconnaissance, token manipulation, and post-exploitation activities during authorized security engagements. It combines PowerShell-based Azure session management with native Graph API integration for comprehensive cloud assessment capabilities.
+ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines **PowerShell-based session management** with **native Graph API integration**. It gives red teamers a single interface to manage multiple Azure sessions, manipulate tokens, enumerate cloud resources, and execute post-exploitation techniques during authorized engagements.
 
-### Key Capabilities
+### Highlights
 
-- **Multi-Session Management** - Maintain multiple Azure PowerShell sessions simultaneously
-- **Token Operations** - Capture, exchange, and manipulate OAuth tokens (access, refresh, PRT)
-- **Microsoft 365 Access** - Read emails, calendar, Teams chats, OneDrive/SharePoint files
-- **Azure Enumeration** - Discover subscriptions, resources, Key Vaults, VMs, and more
-- **Attack Functions** - Password spray, MFA detection, consent phishing, persistence techniques
-- **Reporting** - Generate professional engagement reports with timelines and findings
+> - Manage **multiple Azure PowerShell sessions** simultaneously from a single dashboard
+> - **Capture, exchange, and analyze** OAuth tokens (access, refresh, PRT)
+> - Access **Outlook, Calendar, Teams, OneDrive** and SharePoint through the Graph API
+> - Enumerate **subscriptions, Key Vaults, VMs, storage, SQL, Functions, Logic Apps** and more
+> - Execute **password sprays, consent phishing, persistence techniques**, and post-exploitation
+> - Generate **professional engagement reports** with session timelines and findings
+> - AES-256-GCM **encrypted session persistence** with auto-restore on restart
 
 ---
 
@@ -29,18 +39,20 @@ ANIMO provides a unified interface for Azure AD/Entra ID reconnaissance, token m
 
 ### Prerequisites
 
-- **OS**: Linux (Kali recommended), macOS, or Windows with WSL2
-- **Qt6**: 6.2+ with Widgets, Network, WebEngineWidgets, Sql modules
-- **CMake**: 3.16+
-- **PowerShell**: 7.x (pwsh)
-- **Python**: 3.8+ with msal, requests
+| Requirement | Version |
+|:------------|:--------|
+| OS | Linux (Kali recommended), macOS, or Windows with WSL2 |
+| Qt6 | 6.2+ (Widgets, Network, WebEngineWidgets, Sql) |
+| CMake | 3.16+ |
+| PowerShell | 7.x (`pwsh`) |
+| Python | 3.8+ with `msal`, `requests` |
 
-### Installation
+### Install & Build
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/animo.git
-cd animo
+git clone https://github.com/dmcxblue/ANIMO.git
+cd ANIMO
 
 # Install system dependencies (Linux/Kali)
 ./install-dependencies.sh
@@ -52,90 +64,90 @@ pwsh -File Install-AllModules.ps1
 ./build.sh
 ```
 
-### Running
+### Launch
 
 ```bash
-# Start the server (choose a strong password)
-./build/server/AnimoServer -i 0.0.0.0 -p 7777 -P YourSecurePassword
+# Start the server
+./build/server/AnimoServer -i 0.0.0.0 -p 7777 -P <YourPassword>
 
-# Start the client (in another terminal)
+# Start the client (separate terminal)
 ./build/client/AnimoClient
 ```
 
-Connect to the server using the client's login window with your server IP, port, and password.
+Connect to the server using the client login window with your server IP, port, and password.
 
 ---
 
-## Features
+## Feature Overview
 
 ### Authentication Methods
 
-| Method | Window | Description |
-|--------|--------|-------------|
-| Credentials | `CredentialLoginWindow` | Username/password with MSAL |
-| Device Code | `DeviceCodeLoginWindow` | Phishing-friendly device code flow |
-| Access Token | `TokenLoginWindow` | Direct token input |
-| Browser OAuth | `InteractiveBrowserAuth` | Interactive browser authentication |
-| Illicit Consent | `IllicitConsentGrant` | OAuth consent grant phishing |
+| Method | Description |
+|:-------|:------------|
+| Credentials | Username/password login via MSAL |
+| Device Code | Phishing-friendly device code flow |
+| Access Token | Direct token input |
+| Browser OAuth | Interactive browser authentication |
+| Illicit Consent | OAuth consent grant phishing |
 
 ### Discovery & Enumeration
 
-| Feature | Window | API |
-|---------|--------|-----|
-| Azure Subscriptions | `AzureEnumWindow` | ARM API |
-| Conditional Access | `ConditionalAccessWindow` | Graph API |
-| Cross-Tenant Access | `CrossTenantAccessWindow` | Graph API |
-| OAuth Consent Grants | `OAuthConsentEnumeratorWindow` | Graph API |
-| MFA Status | `MfaStatusCheckerWindow` | Graph API |
-| Password Writeback | `PasswordWritebackCheckerWindow` | Graph API |
-| Service Principals | `SPNEnumWindow` | Graph API |
-| Key Vault Secrets | `KeyVaultExplorerWindow` | Vault API |
-| Virtual Machines | `AzureVMManagerWindow` | ARM API |
-| Storage Accounts | `AzureStorageWindow` | ARM API |
-| SQL Databases | `SqlDatabaseWindow` | ARM API |
-| Function Apps | `FunctionAppExplorerWindow` | ARM API |
-| Logic Apps | `LogicAppsViewerWindow` | ARM API |
-| Automation Runbooks | `RunbookExplorerWindow` | ARM API |
+| Feature | API |
+|:--------|:----|
+| Azure Subscriptions & Resources | ARM |
+| Conditional Access Policies | Graph |
+| Cross-Tenant Access Policies | Graph |
+| OAuth Consent Grants | Graph |
+| MFA Status Checker | Graph |
+| Password Writeback Detection | Graph |
+| Service Principal Enumeration | Graph |
+| Key Vault Secrets & Certificates | Vault |
+| Virtual Machines | ARM |
+| Storage Accounts & Blobs | ARM |
+| SQL Databases | ARM |
+| Function Apps | ARM |
+| Logic Apps | ARM |
+| Automation Runbooks | ARM |
 
 ### Microsoft 365 Access
 
-| Feature | Window | Capabilities |
-|---------|--------|--------------|
-| Outlook Email | `OutlookEmailWindow` | Read, reply, send, bulk operations, templates |
-| Outlook Calendar | `OutlookCalendarWindow` | View calendar events |
-| Teams Chat | `TeamsChatWindow` | Read conversations and messages |
-| OneDrive/SharePoint | `SharePointBrowserWindow` | Browse and download files |
-| Graph Queries | `GraphQueryWindow` | Custom Graph API queries |
+| Feature | Capabilities |
+|:--------|:-------------|
+| Outlook Email | Read, reply, send, bulk operations, templates |
+| Outlook Calendar | View and export calendar events |
+| Teams Chat | Read conversations and messages |
+| OneDrive / SharePoint | Browse, search, and download files |
+| Graph Queries | Execute custom MS Graph API queries |
 
 ### Attack Functions
 
-| Attack | Window | Description |
-|--------|--------|-------------|
-| Password Spray | `MSOLSprayWindow` | Bulk credential testing with smart lockout avoidance |
-| SPN Secret Spray | `SPNSpraySerialWindow` | Service Principal secret enumeration |
-| Add App Secret | `AddAzADAppSecret` | Add secrets to Azure AD applications |
-| Windows Hello Attack | `WHfBAttackWindow` | WHfB credential persistence via device code |
+| Attack | Description |
+|:-------|:------------|
+| Password Spray | Bulk credential testing with smart lockout avoidance |
+| SPN Secret Spray | Service Principal secret enumeration |
+| Add App Secret | Inject secrets into Azure AD applications |
 
-### Post-Exploitation & Persistence
+### Persistence & Post-Exploitation
 
-| Feature | Window/Tab | Description |
-|---------|------------|-------------|
-| Group Manipulation | `PostExploitWindow` | Add users to groups |
-| App Backdoors | `PostExploitWindow` | Create app registrations with secrets |
-| Role Assignment | `PostExploitWindow` | Assign Azure RBAC roles |
-| Guest Invite | `PostExploitWindow` | Silent B2B guest invitations |
-| Email Rules | `EmailRulesWindow` | Create forwarding rules for persistence |
-| Consent Manipulation | `ConsentManipulationWindow` | Manage OAuth consent grants |
+| Technique | Description |
+|:----------|:------------|
+| Windows Hello Attack | WHfB credential persistence via rogue workstation |
+| Email Forwarding Rules | Stealth inbox forwarding rules |
+| Consent Manipulation | Silent OAuth permission grants |
+| App Backdoors | Register apps with hidden credentials |
+| Group Manipulation | Add users to privileged groups |
+| Role Assignment | Assign Azure RBAC roles |
+| Guest Invite | Silent B2B guest invitations |
 
 ### Token Operations
 
-| Feature | Window | Description |
-|---------|--------|-------------|
-| Token Logging | `TokenLogWindow` | View and export captured tokens |
-| Token Analysis | `TokenAnalysisWindow` | JWT claim inspection |
-| Refresh Token Exchange | `RequestRefreshTokens` | Exchange refresh tokens for access tokens |
-| PRT Exchange | `PRTTokenUI` | Primary Refresh Token operations |
-| SSO Cookie | `SsoCookieTokenWindow` | SSO cookie to token conversion |
+| Feature | Description |
+|:--------|:------------|
+| Token Logging | View and export all captured tokens |
+| Token Analysis | JWT claim inspection and validation |
+| Refresh Token Exchange | Exchange refresh tokens across resources |
+| PRT Exchange | Primary Refresh Token operations |
+| SSO Cookie Conversion | SSO cookie to access token |
 
 ---
 
@@ -143,44 +155,33 @@ Connect to the server using the client's login window with your server IP, port,
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         AnimoClient                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ Dashboard   │  │ Plugin      │  │ Direct API Calls        │  │
-│  │ (Sessions)  │  │ Windows     │  │ (Graph, ARM, Vault)     │  │
-│  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘  │
-│         │                │                      │               │
-│         └────────────────┴──────────────────────┘               │
-│                          │                                       │
-│                   ClientTransport                                │
-│                          │ TCP/JSON                              │
-└──────────────────────────┼───────────────────────────────────────┘
+│                         AnimoClient                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+│  │ Dashboard   │  │  Plugin     │  │ Direct API Calls        │ │
+│  │ (Sessions)  │  │  Windows    │  │ (Graph, ARM, Vault)     │ │
+│  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘ │
+│         │                │                       │              │
+│         └────────────────┴───────────────────────┘              │
+│                          │                                      │
+│                   ClientTransport                               │
+│                          │ TCP / JSON                           │
+└──────────────────────────┼──────────────────────────────────────┘
                            │
                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                         AnimoServer                               │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                    Request Dispatcher                        │ │
-│  └──────────┬──────────────────────────────────┬───────────────┘ │
-│             │                                  │                 │
-│  ┌──────────▼──────────┐          ┌───────────▼───────────┐     │
-│  │  PowerShellManager  │          │   SessionDBManager    │     │
-│  │  (Session Processes)│          │   (SQLite Database)   │     │
-│  └─────────────────────┘          └───────────────────────┘     │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         AnimoServer                             │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │                    Request Dispatcher                      │ │
+│  └──────────┬─────────────────────────────────┬───────────────┘ │
+│             │                                 │                 │
+│  ┌──────────▼──────────┐         ┌───────────▼───────────┐     │
+│  │  PowerShellManager  │         │   SessionDBManager    │     │
+│  │  (Session Processes)│         │   (SQLite Database)   │     │
+│  └─────────────────────┘         └───────────────────────┘     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Communication Protocol
-
-Client-server communication uses line-delimited JSON over TCP:
-
-```json
-{"action": "login", "password": "secret"}
-{"action": "new_session", "auth_type": "token", "access_token": "eyJ..."}
-{"action": "run_command", "session_id": "abc123", "command": "Get-AzContext"}
-{"action": "log_token", "access_token": "eyJ...", "source": "device_code"}
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete protocol documentation.
+Communication uses **line-delimited JSON over TCP** (default port 7777). The client sends actions, the server dispatches to PowerShell sessions or the SQLite database and responds with results.
 
 ---
 
@@ -188,57 +189,42 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete protocol documenta
 
 ### Initial Access via Device Code
 
-1. Open **Access → Device Code Login**
-2. Enter a client ID (or use default Microsoft Office)
+1. Open **Access > Device Code Login**
+2. Enter a client ID (or use the default)
 3. Click **Start Device Code Flow**
-4. Send the device code URL to target via phishing
-5. When victim authenticates, tokens are captured
+4. Send the device code URL to the target
+5. When the victim authenticates, tokens are captured automatically
 6. Enable **Create session from captured token** to auto-create a session
 
 ### Enumerate Azure Resources
 
-1. Create a session with Azure Management token
-2. Open **Attacks → Enumeration → Subscriptions & Resources**
+1. Create a session with an Azure Management token
+2. Open **Attacks > Enumeration > Subscriptions & Resources**
 3. Select user and click **Auto-Fetch Token**
-4. Click **Fetch Subscriptions** to list all subscriptions
-5. Select a subscription to enumerate resources
-6. Resources are grouped by type (VMs, Key Vaults, Storage, etc.)
+4. Click **Fetch Subscriptions** to discover all subscriptions
+5. Select a subscription to enumerate resources (VMs, Key Vaults, Storage, etc.)
 
-### Password Spray Attack
+### Password Spray
 
-1. Open **Attacks → Authentication → Password Spray**
+1. Open **Attacks > Authentication > Password Spray**
 2. Enter target usernames (one per line)
 3. Enter passwords to try
 4. Configure delay (500ms+ recommended to avoid lockout)
-5. Click **Start Spray**
-6. Valid credentials are highlighted in green
+5. Click **Start Spray** - valid credentials are highlighted in green
 
 ### Persistence via Email Rules
 
-1. Compromise a mailbox (get Graph token with Mail.ReadWrite)
-2. Open **Persistence → Email Inbox Rules**
-3. Configure rule:
-   - Action: Forward or Redirect
-   - Condition: Subject contains "invoice", "payment"
-   - Target: attacker@evil.com
-4. Enable stealth options (hidden name, stop processing)
-5. Click **Create Rule**
-
-### Generate Engagement Report
-
-1. Run enumeration and collect tokens during engagement
-2. Open **Reports → Generate Report**
-3. Fill in engagement metadata
-4. Select sections to include
-5. Click **Generate HTML Report**
-6. Professional report with timeline and findings is created
+1. Compromise a mailbox (Graph token with `Mail.ReadWrite`)
+2. Open **Persistence > Email Inbox Rules**
+3. Configure a forwarding rule with stealth options (hidden name, stop processing)
+4. Click **Create Rule**
 
 ---
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
-|----------|--------|
+|:---------|:-------|
 | `Ctrl+N` | New Device Code session |
 | `F5` | Refresh sessions list |
 | `Ctrl+Q` | Quit application |
@@ -248,9 +234,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete protocol documenta
 
 ---
 
-## Configuration
-
-### Server Options
+## Server Configuration
 
 ```
 AnimoServer [options]
@@ -262,99 +246,52 @@ AnimoServer [options]
 
 ### Required PowerShell Modules
 
-The following modules are installed by `Install-AllModules.ps1`:
+Installed automatically by `Install-AllModules.ps1`:
 
-- `Az` - Azure Resource Manager
-- `AzureAD` - Azure Active Directory
-- `AADInternals` - Azure AD internals and token operations
-- `Microsoft.Graph` - Microsoft Graph SDK
-- `SqlServer` - Azure SQL operations
-- `AzTable` - Azure Table Storage
-
----
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [README.md](README.md) | This file - overview and quick start |
-| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Detailed installation guide |
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Complete user manual |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Technical architecture and protocol |
-| [docs/ATTACK_TECHNIQUES.md](docs/ATTACK_TECHNIQUES.md) | Attack technique details |
-| [CHANGELOG.md](CHANGELOG.md) | Version history |
+| Module | Purpose |
+|:-------|:--------|
+| `Az` | Azure Resource Manager |
+| `AzureAD` | Azure Active Directory |
+| `AADInternals` | Azure AD internals & token operations |
+| `Microsoft.Graph` | Microsoft Graph SDK |
+| `SqlServer` | Azure SQL operations |
+| `AzTable` | Azure Table Storage |
 
 ---
 
-## Security Considerations
+## Security & OPSEC
 
-### Operational Security
-
-- **TLS**: Use SSH tunnels or VPN for client-server communication over untrusted networks
-- **Passwords**: Server password is transmitted in cleartext - use strong passwords
-- **Tokens**: Captured tokens are stored in SQLite - protect the data directory
-- **Logs**: Activity is logged - sanitize before leaving engagement environment
-
-### Token Handling
-
-- Access tokens expire (typically 1 hour) - use refresh tokens for persistence
-- Refresh tokens last 90 days unless revoked
-- PRT tokens provide SSO across Microsoft services
-- Always delete `data/` directory after engagement
+- **Transport**: Use SSH tunnels or VPN for client-server communication over untrusted networks
+- **Server Password**: Transmitted in cleartext over TCP - use strong passwords
+- **Token Storage**: Captured tokens are stored in SQLite - protect the `data/` directory
+- **Cleanup**: Always delete the `data/` directory after an engagement
+- **Token Lifetimes**: Access tokens expire in ~1 hour; refresh tokens last up to 90 days unless revoked
 
 ---
 
 ## Legal Disclaimer
 
-ANIMO is intended for authorized security testing, red team operations, and security research only. Users are responsible for:
+> **ANIMO is intended for authorized security testing, red team operations, and security research only.**
 
-1. Obtaining proper authorization before testing
-2. Complying with all applicable laws and regulations
-3. Following responsible disclosure practices
-4. Protecting captured credentials and tokens
+Users are responsible for:
+
+1. Obtaining **proper written authorization** before testing
+2. Complying with all **applicable laws and regulations**
+3. Following **responsible disclosure** practices
+4. **Protecting** captured credentials and tokens during and after engagements
 
 **Unauthorized access to computer systems is illegal. The authors are not responsible for misuse of this tool.**
-
----
-
-## Contributing
-
-This is a private security tool. Contributions are limited to authorized team members.
-
-### Development Setup
-
-```bash
-# Build with debug symbols
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-
-# Run tests
-cd build && ctest --output-on-failure
-```
-
-### Code Style
-
-- C++17 standard
-- Qt naming conventions (camelCase for methods, PascalCase for classes)
-- One class per file pair (.h/.cpp)
-- Use `NetworkHelper` for all HTTP requests
-- Use `ErrorLogger` for logging
-- Use `WindowHelper` for window positioning
-
----
-
-## License
-
-Private - All Rights Reserved
 
 ---
 
 ## Acknowledgments
 
 - [AADInternals](https://github.com/Gerenios/AADInternals) - Azure AD internals research
-- [ROADtools](https://github.com/dirkjanm/ROADtools) - Azure AD token operations
+- [ROADtools](https://github.com/dirkjanm/ROADtools) - Azure AD exploration toolkit
 - [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) - Microsoft Authentication Library
 
 ---
 
-**ANIMO** - *Azure Network Intel & Mission Ops*
+<p align="center">
+  <b>ANIMO</b> - <i>Azure Network Intel & Mission Ops</i>
+</p>
