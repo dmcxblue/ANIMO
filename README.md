@@ -35,6 +35,40 @@ ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines *
 
 ---
 
+## Screenshots
+
+### Dashboard
+<!-- Add screenshot: screenshots/dashboard.png -->
+<p align="center">
+  <img src="screenshots/dashboard.png" alt="ANIMO Dashboard" width="800" />
+</p>
+
+### Device Code Authentication
+<!-- Add screenshot: screenshots/device-code.png -->
+<p align="center">
+  <img src="screenshots/device-code.png" alt="Device Code Login" width="800" />
+</p>
+
+### Azure Enumeration
+<!-- Add screenshot: screenshots/azure-enum.png -->
+<p align="center">
+  <img src="screenshots/azure-enum.png" alt="Azure Enumeration" width="800" />
+</p>
+
+### Outlook Email Access
+<!-- Add screenshot: screenshots/outlook-email.png -->
+<p align="center">
+  <img src="screenshots/outlook-email.png" alt="Outlook Email Access" width="800" />
+</p>
+
+### Token Analysis
+<!-- Add screenshot: screenshots/token-analysis.png -->
+<p align="center">
+  <img src="screenshots/token-analysis.png" alt="Token Analysis" width="800" />
+</p>
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -109,6 +143,11 @@ Connect to the server using the client login window with your server IP, port, a
 | Logic Apps | ARM |
 | Automation Runbooks | ARM |
 
+<!-- Add screenshot: screenshots/enumeration.png -->
+<p align="center">
+  <img src="screenshots/enumeration.png" alt="Discovery & Enumeration" width="800" />
+</p>
+
 ### Microsoft 365 Access
 
 | Feature | Capabilities |
@@ -118,6 +157,11 @@ Connect to the server using the client login window with your server IP, port, a
 | Teams Chat | Read conversations and messages |
 | OneDrive / SharePoint | Browse, search, and download files |
 | Graph Queries | Execute custom MS Graph API queries |
+
+<!-- Add screenshot: screenshots/m365-access.png -->
+<p align="center">
+  <img src="screenshots/m365-access.png" alt="Microsoft 365 Access" width="800" />
+</p>
 
 ### Attack Functions
 
@@ -138,6 +182,11 @@ Connect to the server using the client login window with your server IP, port, a
 | Group Manipulation | Add users to privileged groups |
 | Role Assignment | Assign Azure RBAC roles |
 | Guest Invite | Silent B2B guest invitations |
+
+<!-- Add screenshot: screenshots/post-exploit.png -->
+<p align="center">
+  <img src="screenshots/post-exploit.png" alt="Post-Exploitation" width="800" />
+</p>
 
 ### Token Operations
 
