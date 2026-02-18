@@ -181,7 +181,6 @@ void DashboardWindow::initUI()
 
     // === Credential Attacks menu ===
     QAction *actionPasswordSpray  = attacksMenu->addAction("Password Spray");
-    QAction *actionWfh            = attacksMenu->addAction("Windows Hello Attack");
     QAction *actionSPNSpray       = attacksMenu->addAction("SPN Secret Spray");
     QAction *actionAddAppSecret   = attacksMenu->addAction("Add App Secret");
 
@@ -189,7 +188,6 @@ void DashboardWindow::initUI()
     connect(prtTokenAction,          &QAction::triggered, this, &DashboardWindow::openPRTTokenMenu);
     connect(ssoTokenAction,          &QAction::triggered, this, &DashboardWindow::openSsoTokenMenu);
     connect(actionPasswordSpray,     &QAction::triggered, this, &DashboardWindow::openAttackPasswordSpray);
-    connect(actionWfh,               &QAction::triggered, this, &DashboardWindow::openAttackWfh);
     connect(actionSPNSpray,          &QAction::triggered, this, &DashboardWindow::openSPNSpray);
     connect(actionAddAppSecret,      &QAction::triggered, this, &DashboardWindow::openAttackAppSecret);
 
@@ -244,9 +242,11 @@ void DashboardWindow::initUI()
     QAction *actionPostExploit       = persistenceMenu->addAction("Post-Exploitation Tools");
     QAction *actionEmailRules        = persistenceMenu->addAction("Email Inbox Rules");
     QAction *actionConsentManip      = persistenceMenu->addAction("Consent Manipulation");
+    QAction *actionWfh               = persistenceMenu->addAction("Windows Hello Attack");
     connect(actionPostExploit,  &QAction::triggered, this, &DashboardWindow::openPostExploitWindow);
     connect(actionEmailRules,   &QAction::triggered, this, &DashboardWindow::openEmailRulesWindow);
     connect(actionConsentManip, &QAction::triggered, this, &DashboardWindow::openConsentManipulationWindow);
+    connect(actionWfh,          &QAction::triggered, this, &DashboardWindow::openAttackWfh);
 
     // === Logs menu ===
     QAction *tokenLogsAction = logsMenu->addAction("Token Logs");

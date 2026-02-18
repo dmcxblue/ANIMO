@@ -240,7 +240,8 @@ void DeviceCodeLoginWindow::handleResult(const QString &labelId, const QVariantM
         QString refreshToken = result.value("refresh_token").toString();
         QString scope = result.value("scope").toString();
 
-        label->setPlainText(QString("✅ Access Token Received\n\nScope:\n%1\n\nAccess Token:\n%2\n\nRefresh Token:\n%3")
+        label->setOpenExternalLinks(false);
+        label->setPlainText(QString("Access Token Received\n\nScope:\n%1\n\nAccess Token:\n%2\n\nRefresh Token:\n%3")
                             .arg(scope, accessToken, refreshToken));
 
         // Store token in TokenStore for plugin auto-linking
@@ -264,14 +265,16 @@ void DeviceCodeLoginWindow::handleResult(const QString &labelId, const QVariantM
             createSessionFromToken(accessToken, refreshToken, resource);
         }
     } else {
+        label->setOpenExternalLinks(false);
         label->setPlainText("[!] Login failed.");
     }
 }
 
 void DeviceCodeLoginWindow::handleError(const QString &labelId, const QString &message) {
     if (!statusWidgets.contains(labelId)) return;
-    QTextBrowser *label = statusWidgets[labelId].label;   // 🔹 FIXED
-    label->setText("[!] Error: " + message);
+    QTextBrowser *label = statusWidgets[labelId].label;
+    label->setOpenExternalLinks(false);
+    label->setPlainText("[!] Error: " + message);
 }
 
 QObject* DeviceCodeLoginWindow::locateTransport() const {
