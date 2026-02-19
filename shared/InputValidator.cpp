@@ -81,6 +81,26 @@ bool InputValidator::isValidAzureResource(const QString &url) {
     return false;
 }
 
+QString InputValidator::escapePsString(const QString &input) {
+    // In PS single-quoted strings, the ONLY special character is the single quote
+    // itself (doubled to escape). We also strip null bytes and newlines to prevent
+    // injection via string termination.
+    QString escaped;
+    escaped.reserve(input.size() + 16);
+    for (const QChar &ch : input) {
+        if (ch == QLatin1Char('\'')) {
+            escaped.append(QLatin1String("''"));
+        } else if (ch == QLatin1Char('\0')) {
+            continue;
+        } else if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r')) {
+            continue;
+        } else {
+            escaped.append(ch);
+        }
+    }
+    return escaped;
+}
+
 QString InputValidator::sanitize(const QString &input) {
     QString result = input;
 

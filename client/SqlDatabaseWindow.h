@@ -13,6 +13,7 @@
 #include <QProgressBar>
 #include <QProcess>
 #include <QLabel>
+#include <QStackedWidget>
 
 class SqlDatabaseWindow : public QWidget {
     Q_OBJECT
@@ -35,6 +36,9 @@ private slots:
     void onUserSelected(int index);
     void refreshUserList();
     void cancelRequests();
+    void onAuthModeChanged(int index);
+    void executeCredentialQuery();
+    void onQueryTemplateChanged(int index);
 
 private:
     void setupUi();
@@ -53,13 +57,34 @@ private:
     void executeSchemaQuery(const QString &dbName);
     void parseSchemaOutput(const QString &output);
 
-    // UI elements
+    // Credential mode helpers
+    QString getEffectiveServerFqdn() const;
+    QString getEffectiveDatabaseName() const;
+    bool isCredentialMode() const;
+    void executeCredentialSchemaQuery(const QString &dbName);
+    void executeCredentialDataQuery(const QString &tableName, int rowLimit);
+    void parseCredentialQueryOutput(const QString &output);
+
+    // Auth mode
+    QComboBox *authModeCombo;
+    QStackedWidget *authStack;
+
+    // Token auth UI elements
     QComboBox *userSelector;
     QLineEdit *mgmtTokenInput;
     QLineEdit *sqlTokenInput;
     QPushButton *autoFetchBtn;
     QLabel *mgmtTokenStatus;
     QLabel *sqlTokenStatus;
+
+    // Credential auth UI elements
+    QLineEdit *serverFqdnInput;
+    QLineEdit *sqlUsernameInput;
+    QLineEdit *sqlPasswordInput;
+    QLineEdit *credDatabaseInput;
+    QPushButton *credQueryBtn;
+    QComboBox *queryTemplateCombo;
+    QTextEdit *customQueryInput;
 
     // Current user context
     QString selectedUpn;

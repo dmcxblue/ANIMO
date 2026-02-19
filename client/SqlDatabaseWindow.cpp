@@ -2,6 +2,8 @@
 #include "TokenHelper.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
+#include "InputValidator.h"
+#include "OutputSanitizer.h"
 
 #include <memory>
 #include <QVBoxLayout>
@@ -45,9 +47,31 @@ SqlDatabaseWindow::~SqlDatabaseWindow() {
 void SqlDatabaseWindow::setupUi() {
     auto *mainLayout = new QVBoxLayout(this);
 
-    // Token inputs
-    auto *tokenGroup = new QGroupBox("Authentication Tokens", this);
-    auto *tokenLayout = new QVBoxLayout(tokenGroup);
+    // ====================================================================
+    // Auth mode selector
+    // ====================================================================
+    auto *authModeRow = new QHBoxLayout();
+    authModeRow->addWidget(new QLabel("Authentication Mode:", this));
+    authModeCombo = new QComboBox(this);
+    authModeCombo->addItem("Token Authentication");
+    authModeCombo->addItem("SQL Credentials (Invoke-SqlCmd)");
+    authModeCombo->setMinimumWidth(250);
+    authModeRow->addWidget(authModeCombo);
+    authModeRow->addStretch();
+    mainLayout->addLayout(authModeRow);
+
+    // ====================================================================
+    // Stacked widget for auth modes
+    // ====================================================================
+    authStack = new QStackedWidget(this);
+
+    // --- Page 0: Token Authentication (existing) ---
+    auto *tokenPage = new QWidget(this);
+    auto *tokenLayout = new QVBoxLayout(tokenPage);
+    tokenLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *tokenGroup = new QGroupBox("Token Authentication", this);
+    auto *tokenGroupLayout = new QVBoxLayout(tokenGroup);
 
     // User selector row
     auto *userRow = new QHBoxLayout();
@@ -60,7 +84,7 @@ void SqlDatabaseWindow::setupUi() {
     refreshUsersBtn->setFixedWidth(70);
     userRow->addWidget(refreshUsersBtn);
     userRow->addStretch();
-    tokenLayout->addLayout(userRow);
+    tokenGroupLayout->addLayout(userRow);
 
     // Auto-fetch button row
     auto *autoFetchRow = new QHBoxLayout();
@@ -68,7 +92,7 @@ void SqlDatabaseWindow::setupUi() {
     autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
-    tokenLayout->addLayout(autoFetchRow);
+    tokenGroupLayout->addLayout(autoFetchRow);
 
     connect(userSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SqlDatabaseWindow::onUserSelected);
     connect(refreshUsersBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::refreshUserList);
@@ -82,7 +106,7 @@ void SqlDatabaseWindow::setupUi() {
     mgmtTokenStatus = new QLabel(this);
     mgmtTokenStatus->setFixedWidth(80);
     mgmtRow->addWidget(mgmtTokenStatus);
-    tokenLayout->addLayout(mgmtRow);
+    tokenGroupLayout->addLayout(mgmtRow);
 
     auto *sqlRow = new QHBoxLayout();
     sqlRow->addWidget(new QLabel("SQL Database Token:", this));
@@ -93,13 +117,96 @@ void SqlDatabaseWindow::setupUi() {
     sqlTokenStatus = new QLabel(this);
     sqlTokenStatus->setFixedWidth(80);
     sqlRow->addWidget(sqlTokenStatus);
-    tokenLayout->addLayout(sqlRow);
+    tokenGroupLayout->addLayout(sqlRow);
 
-    mainLayout->addWidget(tokenGroup);
+    tokenLayout->addWidget(tokenGroup);
+    authStack->addWidget(tokenPage);
 
     connect(autoFetchBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::autoFetchTokens);
 
-    // Controls row 1
+    // --- Page 1: SQL Credentials ---
+    auto *credPage = new QWidget(this);
+    auto *credLayout = new QVBoxLayout(credPage);
+    credLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *credGroup = new QGroupBox("SQL Credentials (Invoke-SqlCmd)", this);
+    auto *credGroupLayout = new QVBoxLayout(credGroup);
+
+    auto *serverRow = new QHBoxLayout();
+    serverRow->addWidget(new QLabel("Server FQDN:", this));
+    serverFqdnInput = new QLineEdit(this);
+    serverFqdnInput->setPlaceholderText("e.g. myserver.database.windows.net");
+    serverFqdnInput->setMinimumWidth(350);
+    serverRow->addWidget(serverFqdnInput);
+    credGroupLayout->addLayout(serverRow);
+
+    auto *dbRow = new QHBoxLayout();
+    dbRow->addWidget(new QLabel("Database:", this));
+    credDatabaseInput = new QLineEdit(this);
+    credDatabaseInput->setPlaceholderText("e.g. Finance, master");
+    credDatabaseInput->setMinimumWidth(250);
+    dbRow->addWidget(credDatabaseInput);
+    dbRow->addStretch();
+    credGroupLayout->addLayout(dbRow);
+
+    auto *userPassRow = new QHBoxLayout();
+    userPassRow->addWidget(new QLabel("Username:", this));
+    sqlUsernameInput = new QLineEdit(this);
+    sqlUsernameInput->setPlaceholderText("SQL username");
+    sqlUsernameInput->setMinimumWidth(200);
+    userPassRow->addWidget(sqlUsernameInput);
+    userPassRow->addSpacing(20);
+    userPassRow->addWidget(new QLabel("Password:", this));
+    sqlPasswordInput = new QLineEdit(this);
+    sqlPasswordInput->setPlaceholderText("SQL password");
+    sqlPasswordInput->setEchoMode(QLineEdit::Password);
+    sqlPasswordInput->setMinimumWidth(200);
+    userPassRow->addWidget(sqlPasswordInput);
+    credGroupLayout->addLayout(userPassRow);
+
+    // Query template selector
+    auto *queryRow = new QHBoxLayout();
+    queryRow->addWidget(new QLabel("Query Template:", this));
+    queryTemplateCombo = new QComboBox(this);
+    queryTemplateCombo->addItem("Check Database Permissions", "SELECT * FROM fn_my_permissions(NULL, 'DATABASE');");
+    queryTemplateCombo->addItem("Check Server Permissions", "SELECT * FROM fn_my_permissions(NULL, 'SERVER');");
+    queryTemplateCombo->addItem("List Databases", "SELECT name, state_desc, recovery_model_desc FROM sys.databases;");
+    queryTemplateCombo->addItem("List Tables (Schema)", "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME;");
+    queryTemplateCombo->addItem("Database Users & Roles", "SELECT name, type_desc, authentication_type_desc FROM sys.database_principals WHERE type NOT IN ('R') ORDER BY name;");
+    queryTemplateCombo->addItem("Server Logins", "SELECT name, type_desc, is_disabled FROM sys.server_principals ORDER BY name;");
+    queryTemplateCombo->addItem("Custom Query");
+    queryTemplateCombo->setMinimumWidth(300);
+    queryRow->addWidget(queryTemplateCombo);
+    queryRow->addStretch();
+    credGroupLayout->addLayout(queryRow);
+
+    // Custom query input
+    customQueryInput = new QTextEdit(this);
+    customQueryInput->setPlaceholderText("Enter custom SQL query here...");
+    customQueryInput->setMaximumHeight(80);
+    customQueryInput->setVisible(false);
+    credGroupLayout->addWidget(customQueryInput);
+
+    // Run query button
+    auto *credBtnRow = new QHBoxLayout();
+    credQueryBtn = new QPushButton("Run Query", this);
+    credQueryBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    credBtnRow->addWidget(credQueryBtn);
+    credBtnRow->addStretch();
+    credGroupLayout->addLayout(credBtnRow);
+
+    credLayout->addWidget(credGroup);
+    authStack->addWidget(credPage);
+
+    mainLayout->addWidget(authStack);
+
+    connect(authModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SqlDatabaseWindow::onAuthModeChanged);
+    connect(queryTemplateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SqlDatabaseWindow::onQueryTemplateChanged);
+    connect(credQueryBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::executeCredentialQuery);
+
+    // ====================================================================
+    // Controls row 1 (ARM enumeration - works in both modes if mgmt token available)
+    // ====================================================================
     auto *controlLayout1 = new QHBoxLayout();
     enumServersBtn = new QPushButton("Enumerate SQL Servers", this);
     subscriptionCombo = new QComboBox(this);
@@ -170,7 +277,7 @@ void SqlDatabaseWindow::setupUi() {
     // Log output
     logOutput = new QTextEdit(this);
     logOutput->setReadOnly(true);
-    logOutput->setMaximumHeight(150);
+    logOutput->setMaximumHeight(300);
     splitter->addWidget(logOutput);
 
     mainLayout->addWidget(splitter);
@@ -188,7 +295,44 @@ void SqlDatabaseWindow::setupUi() {
     connect(exportBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::exportResults);
     connect(cancelBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::cancelRequests);
 
-    resize(1100, 750);
+    resize(1100, 800);
+}
+
+// ============================================================================
+// Auth Mode Switching
+// ============================================================================
+
+void SqlDatabaseWindow::onAuthModeChanged(int index) {
+    authStack->setCurrentIndex(index);
+    if (index == 0) {
+        appendLog("[*] Switched to Token Authentication mode", "cyan");
+    } else {
+        appendLog("[*] Switched to SQL Credentials mode (Invoke-SqlCmd)", "cyan");
+    }
+}
+
+void SqlDatabaseWindow::onQueryTemplateChanged(int index) {
+    // Show custom query input only when "Custom Query" is selected (last item)
+    bool isCustom = (index == queryTemplateCombo->count() - 1);
+    customQueryInput->setVisible(isCustom);
+}
+
+bool SqlDatabaseWindow::isCredentialMode() const {
+    return authModeCombo->currentIndex() == 1;
+}
+
+QString SqlDatabaseWindow::getEffectiveServerFqdn() const {
+    if (isCredentialMode() && !serverFqdnInput->text().trimmed().isEmpty()) {
+        return serverFqdnInput->text().trimmed();
+    }
+    return currentServerFqdn;
+}
+
+QString SqlDatabaseWindow::getEffectiveDatabaseName() const {
+    if (isCredentialMode() && !credDatabaseInput->text().trimmed().isEmpty()) {
+        return credDatabaseInput->text().trimmed();
+    }
+    return databaseCombo->currentText();
 }
 
 QNetworkRequest SqlDatabaseWindow::bearerRequest(const QString &url, const QString &token) {
@@ -207,8 +351,9 @@ void SqlDatabaseWindow::setLoading(bool loading) {
     listDatabasesBtn->setEnabled(!loading && !currentServerId.isEmpty());
     listFirewallBtn->setEnabled(!loading && !currentServerId.isEmpty());
     serverDetailsBtn->setEnabled(!loading && !currentServerId.isEmpty());
-    downloadSchemaBtn->setEnabled(!loading && databaseCombo->currentIndex() >= 0);
-    downloadDataBtn->setEnabled(!loading && databaseCombo->currentIndex() >= 0);
+    downloadSchemaBtn->setEnabled(!loading && (databaseCombo->currentIndex() >= 0 || isCredentialMode()));
+    downloadDataBtn->setEnabled(!loading && (databaseCombo->currentIndex() >= 0 || isCredentialMode()));
+    credQueryBtn->setEnabled(!loading);
     cancelBtn->setEnabled(loading);
     if (!loading) {
         cancelRequested = false;
@@ -474,13 +619,14 @@ bool SqlDatabaseWindow::validateSqlToken(const QString &token) {
 }
 
 // ============================================================================
-// SQL Server Enumeration
+// SQL Server Enumeration (ARM API - works in both modes)
 // ============================================================================
 
 void SqlDatabaseWindow::enumerateSqlServers() {
     QString token = mgmtTokenInput->text().trimmed();
     if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter an Azure Management access token.");
+        QMessageBox::warning(this, "Missing Token", "Please enter an Azure Management access token.\n\n"
+            "Switch to Token Authentication mode if needed.");
         return;
     }
 
@@ -493,6 +639,7 @@ void SqlDatabaseWindow::enumerateSqlServers() {
     setLoading(true);
     appendLog("[*] Enumerating subscriptions...", "cyan");
     resultsTree->clear();
+    resultsTree->setHeaderLabels({"Name", "Type", "Status/Data Type", "Location/Nullable", "Edition/Max Length", "Details"});
     serverCombo->clear();
     databaseCombo->clear();
     sqlServers = QJsonArray();
@@ -820,25 +967,378 @@ void SqlDatabaseWindow::getServerDetails() {
 }
 
 // ============================================================================
-// Schema Download
+// Credential-Based Query Execution (Invoke-SqlCmd)
+// ============================================================================
+
+void SqlDatabaseWindow::executeCredentialQuery() {
+    QString server = serverFqdnInput->text().trimmed();
+    QString database = credDatabaseInput->text().trimmed();
+    QString username = sqlUsernameInput->text().trimmed();
+    QString password = sqlPasswordInput->text();
+
+    if (server.isEmpty()) {
+        QMessageBox::warning(this, "Missing Server", "Please enter the SQL Server FQDN.\n\nExample: myserver.database.windows.net");
+        return;
+    }
+    if (database.isEmpty()) {
+        QMessageBox::warning(this, "Missing Database", "Please enter the database name.");
+        return;
+    }
+    if (username.isEmpty() || password.isEmpty()) {
+        QMessageBox::warning(this, "Missing Credentials", "Please enter both username and password.");
+        return;
+    }
+
+    // Determine query
+    QString query;
+    int templateIdx = queryTemplateCombo->currentIndex();
+    if (templateIdx == queryTemplateCombo->count() - 1) {
+        // Custom query
+        query = customQueryInput->toPlainText().trimmed();
+        if (query.isEmpty()) {
+            QMessageBox::warning(this, "Missing Query", "Please enter a custom SQL query.");
+            return;
+        }
+    } else {
+        query = queryTemplateCombo->currentData().toString();
+    }
+
+    setLoading(true);
+    appendLog(QString("[*] Executing query on %1/%2 as %3...").arg(server, database, username), "cyan");
+    appendLog(QString("[*] Query: %1").arg(query.left(100)), "gray");
+
+    // Build PowerShell script with Invoke-SqlCmd
+    QString script = QString(
+        "$ErrorActionPreference='Stop'\n"
+        "try {\n"
+        "  $secPass = ConvertTo-SecureString '%1' -AsPlainText -Force\n"
+        "  $cred = New-Object System.Management.Automation.PSCredential('%2', $secPass)\n"
+        "  Write-Output '__QUERY_START__'\n"
+        "  $results = Invoke-SqlCmd -ServerInstance '%3' -Database '%4' -Credential $cred -Query '%5' -TrustServerCertificate -ConnectionTimeout 30 -QueryTimeout 60 -WarningAction SilentlyContinue 3>$null\n"
+        "  if ($results) {\n"
+        "    $results | Select-Object -Property * -ExcludeProperty RowError,RowState,Table,ItemArray,HasErrors | ConvertTo-Json -Depth 2 -Compress -WarningAction SilentlyContinue 3>$null\n"
+        "  } else {\n"
+        "    Write-Output '__NO_RESULTS__'\n"
+        "  }\n"
+        "  Write-Output ''\n"
+        "  Write-Output '__QUERY_END__'\n"
+        "} catch {\n"
+        "  Write-Output \"__QUERY_ERROR__:$($_.Exception.Message)\"\n"
+        "}\n"
+    ).arg(
+        InputValidator::escapePsString(password),
+        InputValidator::escapePsString(username),
+        InputValidator::escapePsString(server),
+        InputValidator::escapePsString(database),
+        InputValidator::escapePsString(query)
+    );
+
+    if (pwshProcess) {
+        pwshProcess->kill();
+        pwshProcess->deleteLater();
+    }
+
+    pwshProcess = new QProcess(this);
+    pwshProcess->setProcessChannelMode(QProcess::MergedChannels);
+
+    connect(pwshProcess, &QProcess::finished, this, [this](int, QProcess::ExitStatus) {
+        QString output = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(pwshProcess->readAllStandardOutput()));
+        setLoading(false);
+
+        if (output.contains("__QUERY_ERROR__:")) {
+            QString error = output.section("__QUERY_ERROR__:", 1).section('\n', 0, 0);
+            appendLog(QString("[-] Query failed: %1").arg(error), "red");
+            QMessageBox::critical(this, "Query Error", QString("Failed to execute query:\n\n%1").arg(error));
+            pwshProcess->deleteLater();
+            pwshProcess = nullptr;
+            return;
+        }
+
+        if (output.contains("__QUERY_START__") && output.contains("__QUERY_END__")) {
+            QString data = output.section("__QUERY_START__", 1).section("__QUERY_END__", 0, 0).trimmed();
+
+            if (data.contains("__NO_RESULTS__")) {
+                appendLog("[!] Query returned no results", "yellow");
+            } else {
+                parseCredentialQueryOutput(data);
+            }
+        } else {
+            appendLog("[-] Unexpected output from query", "red");
+            appendLog(output.left(500), "yellow");
+        }
+
+        pwshProcess->deleteLater();
+        pwshProcess = nullptr;
+    });
+
+    QStringList args;
+    args << "-NoProfile" << "-NonInteractive" << "-Command" << script;
+    pwshProcess->start("pwsh", args);
+
+    if (!pwshProcess->waitForStarted(5000)) {
+        setLoading(false);
+        appendLog("[-] Failed to start PowerShell process", "red");
+        QMessageBox::critical(this, "Error", "Failed to start PowerShell. Make sure 'pwsh' is installed\n"
+            "and the SqlServer module is available:\n\n  Install-Module SqlServer");
+    }
+}
+
+void SqlDatabaseWindow::parseCredentialQueryOutput(const QString &output) {
+    QJsonDocument doc = QJsonDocument::fromJson(output.toUtf8());
+
+    QJsonArray rows;
+    if (doc.isArray()) {
+        rows = doc.array();
+    } else if (doc.isObject()) {
+        // Single result row comes as object
+        rows.append(doc.object());
+    } else {
+        // Not JSON - display as raw text lines in tree
+        QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+        auto *rawGroup = new QTreeWidgetItem(resultsTree);
+        rawGroup->setText(0, QString("Query Results (%1 lines)").arg(lines.size()));
+        rawGroup->setText(1, "Raw");
+        for (const QString &line : lines) {
+            auto *item = new QTreeWidgetItem(rawGroup);
+            item->setText(0, line.trimmed());
+        }
+        rawGroup->setExpanded(true);
+        appendLog(QString("[+] %1 line(s) returned (raw text)").arg(lines.size()), "green");
+        return;
+    }
+
+    if (rows.isEmpty()) {
+        appendLog("[!] Query returned empty result set", "yellow");
+        return;
+    }
+
+    // Collect column names from first row
+    QStringList columns = rows[0].toObject().keys();
+
+    appendLog(QString("[+] Query returned %1 row(s), %2 column(s)").arg(rows.size()).arg(columns.size()), "green");
+
+    // ---- Build HTML table for the log output ----
+    QString html;
+    html += "<br/><table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse; border-color:#555; font-size:11px;'>";
+
+    // Header row
+    html += "<tr>";
+    for (const QString &col : columns) {
+        html += QString("<th style='background-color:#2d5aa0; color:white; padding:4px 8px;'>%1</th>").arg(col.toHtmlEscaped());
+    }
+    html += "</tr>";
+
+    // Data rows
+    for (int i = 0; i < rows.size(); i++) {
+        QJsonObject row = rows[i].toObject();
+        QString bgColor = (i % 2 == 0) ? "#2a2a2a" : "#333333";
+        html += QString("<tr style='background-color:%1;'>").arg(bgColor);
+        for (const QString &col : columns) {
+            QJsonValue val = row.value(col);
+            QString valStr;
+            if (val.isString()) valStr = val.toString();
+            else if (val.isDouble()) valStr = QString::number(val.toDouble());
+            else if (val.isBool()) valStr = val.toBool() ? "True" : "False";
+            else if (val.isNull()) valStr = "NULL";
+            else valStr = QString::fromUtf8(QJsonDocument(QJsonObject{{col, val}}).toJson(QJsonDocument::Compact));
+
+            QString color = (valStr == "NULL") ? "#888" : "#ddd";
+            html += QString("<td style='color:%1; padding:3px 6px;'>%2</td>").arg(color, valStr.toHtmlEscaped());
+        }
+        html += "</tr>";
+    }
+    html += "</table><br/>";
+
+    logOutput->append(html);
+
+    // ---- Populate tree with flat readable rows ----
+    // Dynamically set tree columns to match query result columns
+    QStringList treeHeaders;
+    int maxTreeCols = qMin(columns.size(), 6); // Tree supports up to 6 columns
+    for (int i = 0; i < maxTreeCols; i++) {
+        treeHeaders << columns[i];
+    }
+    // Pad remaining columns if less than 6
+    while (treeHeaders.size() < 6) {
+        treeHeaders << "";
+    }
+    resultsTree->setHeaderLabels(treeHeaders);
+
+    auto *resultGroup = new QTreeWidgetItem(resultsTree);
+    resultGroup->setText(0, QString("Query Results (%1 rows)").arg(rows.size()));
+
+    for (int i = 0; i < rows.size(); i++) {
+        QJsonObject row = rows[i].toObject();
+        auto *rowItem = new QTreeWidgetItem(resultGroup);
+
+        for (int c = 0; c < maxTreeCols; c++) {
+            QJsonValue val = row.value(columns[c]);
+            QString valStr;
+            if (val.isString()) valStr = val.toString();
+            else if (val.isDouble()) valStr = QString::number(val.toDouble());
+            else if (val.isBool()) valStr = val.toBool() ? "True" : "False";
+            else if (val.isNull()) valStr = "NULL";
+            else valStr = QString::fromUtf8(QJsonDocument(QJsonObject{{columns[c], val}}).toJson(QJsonDocument::Compact));
+
+            rowItem->setText(c, valStr);
+        }
+
+        // If more than 6 columns, append overflow to a tooltip
+        if (columns.size() > 6) {
+            QStringList overflow;
+            for (int c = 6; c < columns.size(); c++) {
+                QJsonValue val = row.value(columns[c]);
+                QString valStr;
+                if (val.isString()) valStr = val.toString();
+                else if (val.isDouble()) valStr = QString::number(val.toDouble());
+                else if (val.isBool()) valStr = val.toBool() ? "True" : "False";
+                else if (val.isNull()) valStr = "NULL";
+                else valStr = QString::fromUtf8(QJsonDocument(QJsonObject{{columns[c], val}}).toJson(QJsonDocument::Compact));
+                overflow << QString("%1: %2").arg(columns[c], valStr);
+            }
+            rowItem->setToolTip(0, overflow.join("\n"));
+        }
+    }
+
+    resultGroup->setExpanded(true);
+}
+
+// ============================================================================
+// Schema Download (supports both token and credential modes)
 // ============================================================================
 
 void SqlDatabaseWindow::downloadDatabaseSchema() {
-    if (databaseCombo->currentIndex() < 0) {
-        QMessageBox::warning(this, "No Database", "Please select a database first.");
-        return;
+    if (isCredentialMode()) {
+        // Credential mode - use Invoke-SqlCmd
+        QString server = getEffectiveServerFqdn();
+        QString database = getEffectiveDatabaseName();
+
+        if (server.isEmpty()) {
+            QMessageBox::warning(this, "Missing Server", "Please enter the SQL Server FQDN.");
+            return;
+        }
+        if (database.isEmpty()) {
+            QMessageBox::warning(this, "Missing Database", "Please enter or select a database name.");
+            return;
+        }
+        if (sqlUsernameInput->text().trimmed().isEmpty() || sqlPasswordInput->text().isEmpty()) {
+            QMessageBox::warning(this, "Missing Credentials", "Please enter SQL credentials.");
+            return;
+        }
+
+        appendLog(QString("[*] Downloading schema for %1/%2 via credentials...").arg(server, database), "cyan");
+        executeCredentialSchemaQuery(database);
+    } else {
+        // Token mode - existing behavior
+        if (databaseCombo->currentIndex() < 0) {
+            QMessageBox::warning(this, "No Database", "Please select a database first.");
+            return;
+        }
+
+        QString token = sqlTokenInput->text().trimmed();
+        if (!validateSqlToken(token)) {
+            return;
+        }
+
+        currentDbName = databaseCombo->currentText();
+        appendLog(QString("[*] Downloading schema for database: %1").arg(currentDbName), "cyan");
+        executeSchemaQuery(currentDbName);
     }
-
-    QString token = sqlTokenInput->text().trimmed();
-    if (!validateSqlToken(token)) {
-        return;
-    }
-
-    currentDbName = databaseCombo->currentText();
-    appendLog(QString("[*] Downloading schema for database: %1").arg(currentDbName), "cyan");
-
-    executeSchemaQuery(currentDbName);
 }
+
+void SqlDatabaseWindow::executeCredentialSchemaQuery(const QString &dbName) {
+    setLoading(true);
+
+    QString server = getEffectiveServerFqdn();
+    QString username = sqlUsernameInput->text().trimmed();
+    QString password = sqlPasswordInput->text();
+
+    QString schemaQuery =
+        "SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.TABLE_TYPE, "
+        "c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, "
+        "c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION "
+        "FROM INFORMATION_SCHEMA.TABLES t "
+        "LEFT JOIN INFORMATION_SCHEMA.COLUMNS c ON t.TABLE_NAME = c.TABLE_NAME AND t.TABLE_SCHEMA = c.TABLE_SCHEMA "
+        "ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME, c.ORDINAL_POSITION";
+
+    QString script = QString(
+        "$ErrorActionPreference='Stop'\n"
+        "try {\n"
+        "  $secPass = ConvertTo-SecureString '%1' -AsPlainText -Force\n"
+        "  $cred = New-Object System.Management.Automation.PSCredential('%2', $secPass)\n"
+        "  Write-Output '__SCHEMA_START__'\n"
+        "  $results = Invoke-SqlCmd -ServerInstance '%3' -Database '%4' -Credential $cred -Query '%5' -TrustServerCertificate -ConnectionTimeout 30 -QueryTimeout 120 -WarningAction SilentlyContinue 3>$null\n"
+        "  foreach ($row in $results) {\n"
+        "    $schema = $row.TABLE_SCHEMA\n"
+        "    $table = $row.TABLE_NAME\n"
+        "    $type = $row.TABLE_TYPE\n"
+        "    $col = $row.COLUMN_NAME\n"
+        "    $dtype = $row.DATA_TYPE\n"
+        "    $nullable = $row.IS_NULLABLE\n"
+        "    $maxlen = $row.CHARACTER_MAXIMUM_LENGTH\n"
+        "    $precision = $row.NUMERIC_PRECISION\n"
+        "    Write-Output \"$schema|$table|$type|$col|$dtype|$nullable|$maxlen|$precision\"\n"
+        "  }\n"
+        "  Write-Output '__SCHEMA_END__'\n"
+        "} catch {\n"
+        "  Write-Output \"__SCHEMA_ERROR__:$($_.Exception.Message)\"\n"
+        "}\n"
+    ).arg(
+        InputValidator::escapePsString(password),
+        InputValidator::escapePsString(username),
+        InputValidator::escapePsString(server),
+        InputValidator::escapePsString(dbName),
+        InputValidator::escapePsString(schemaQuery)
+    );
+
+    if (pwshProcess) {
+        pwshProcess->kill();
+        pwshProcess->deleteLater();
+    }
+
+    pwshProcess = new QProcess(this);
+    pwshProcess->setProcessChannelMode(QProcess::MergedChannels);
+    currentDbName = dbName;
+
+    connect(pwshProcess, &QProcess::finished, this, [this](int, QProcess::ExitStatus) {
+        QString output = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(pwshProcess->readAllStandardOutput()));
+        setLoading(false);
+
+        if (output.contains("__SCHEMA_ERROR__:")) {
+            QString error = output.section("__SCHEMA_ERROR__:", 1).section('\n', 0, 0);
+            appendLog(QString("[-] Schema query failed: %1").arg(error), "red");
+            QMessageBox::critical(this, "Schema Error", QString("Failed to query schema:\n\n%1").arg(error));
+            pwshProcess->deleteLater();
+            pwshProcess = nullptr;
+            return;
+        }
+
+        if (output.contains("__SCHEMA_START__") && output.contains("__SCHEMA_END__")) {
+            QString schemaData = output.section("__SCHEMA_START__", 1).section("__SCHEMA_END__", 0, 0).trimmed();
+            parseSchemaOutput(schemaData);
+        } else {
+            appendLog("[-] Unexpected output from schema query", "red");
+            appendLog(output.left(500), "yellow");
+        }
+
+        pwshProcess->deleteLater();
+        pwshProcess = nullptr;
+    });
+
+    QStringList args;
+    args << "-NoProfile" << "-NonInteractive" << "-Command" << script;
+    pwshProcess->start("pwsh", args);
+
+    if (!pwshProcess->waitForStarted(5000)) {
+        setLoading(false);
+        appendLog("[-] Failed to start PowerShell process", "red");
+        QMessageBox::critical(this, "Error", "Failed to start PowerShell. Make sure 'pwsh' and SqlServer module are installed.");
+    }
+}
+
+// ============================================================================
+// Token-Based Schema Download (existing)
+// ============================================================================
 
 void SqlDatabaseWindow::executeSchemaQuery(const QString &dbName) {
     setLoading(true);
@@ -901,7 +1401,7 @@ void SqlDatabaseWindow::executeSchemaQuery(const QString &dbName) {
     pwshProcess->setProcessChannelMode(QProcess::MergedChannels);
 
     connect(pwshProcess, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus) {
-        QString output = QString::fromUtf8(pwshProcess->readAllStandardOutput());
+        QString output = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(pwshProcess->readAllStandardOutput()));
         setLoading(false);
 
         if (output.contains("__SCHEMA_ERROR__:")) {
@@ -1008,6 +1508,10 @@ void SqlDatabaseWindow::parseSchemaOutput(const QString &output) {
     appendLog(QString("[+] Schema loaded: %1 tables, %2 columns").arg(tableItems.size()).arg(columnCount), "green");
 }
 
+// ============================================================================
+// Table Data Download (supports both token and credential modes)
+// ============================================================================
+
 void SqlDatabaseWindow::downloadTableData() {
     auto *item = resultsTree->currentItem();
     if (!item) {
@@ -1028,11 +1532,6 @@ void SqlDatabaseWindow::downloadTableData() {
 
     QString tableName = item->text(0); // schema.table format
 
-    QString token = sqlTokenInput->text().trimmed();
-    if (!validateSqlToken(token)) {
-        return;
-    }
-
     // Ask for row limit
     bool ok;
     int rowLimit = QInputDialog::getInt(this, "Row Limit",
@@ -1040,44 +1539,157 @@ void SqlDatabaseWindow::downloadTableData() {
         100, 1, 10000, 100, &ok);
     if (!ok) return;
 
+    if (isCredentialMode()) {
+        QString server = getEffectiveServerFqdn();
+        if (server.isEmpty()) {
+            QMessageBox::warning(this, "Missing Server", "Please enter the SQL Server FQDN.");
+            return;
+        }
+        if (sqlUsernameInput->text().trimmed().isEmpty() || sqlPasswordInput->text().isEmpty()) {
+            QMessageBox::warning(this, "Missing Credentials", "Please enter SQL credentials.");
+            return;
+        }
+        executeCredentialDataQuery(tableName, rowLimit);
+    } else {
+        // Token mode - existing behavior
+        QString token = sqlTokenInput->text().trimmed();
+        if (!validateSqlToken(token)) {
+            return;
+        }
+
+        setLoading(true);
+        appendLog(QString("[*] Downloading top %1 rows from %2...").arg(rowLimit).arg(tableName), "cyan");
+
+        QString script = QString(
+            "$ErrorActionPreference='Stop'\n"
+            "$token = @'\n%1\n'@\n"
+            "$server = '%2'\n"
+            "$database = '%3'\n"
+            "try {\n"
+            "  $conn = New-Object System.Data.SqlClient.SqlConnection\n"
+            "  $conn.ConnectionString = \"Server=tcp:$server,1433;Initial Catalog=$database;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;\"\n"
+            "  $conn.AccessToken = $token\n"
+            "  $conn.Open()\n"
+            "  Write-Output '__DATA_START__'\n"
+            "  $cmd = $conn.CreateCommand()\n"
+            "  $cmd.CommandText = 'SELECT TOP %4 * FROM %5'\n"
+            "  $reader = $cmd.ExecuteReader()\n"
+            "  # Output column headers\n"
+            "  $cols = @()\n"
+            "  for ($i = 0; $i -lt $reader.FieldCount; $i++) { $cols += $reader.GetName($i) }\n"
+            "  Write-Output ($cols -join '|')\n"
+            "  Write-Output '__HEADER_END__'\n"
+            "  while ($reader.Read()) {\n"
+            "    $row = @()\n"
+            "    for ($i = 0; $i -lt $reader.FieldCount; $i++) {\n"
+            "      $val = $reader.GetValue($i)\n"
+            "      if ($val -eq [DBNull]::Value) { $val = 'NULL' }\n"
+            "      $row += [string]$val -replace '\\|',';'\n"
+            "    }\n"
+            "    Write-Output ($row -join '|')\n"
+            "  }\n"
+            "  $reader.Close()\n"
+            "  $conn.Close()\n"
+            "  Write-Output '__DATA_END__'\n"
+            "} catch {\n"
+            "  Write-Output \"__DATA_ERROR__:$($_.Exception.Message)\"\n"
+            "}\n"
+        ).arg(token, currentServerFqdn, currentDbName, QString::number(rowLimit), tableName);
+
+        QProcess *dataProcess = new QProcess(this);
+        dataProcess->setProcessChannelMode(QProcess::MergedChannels);
+
+        connect(dataProcess, &QProcess::finished, this, [this, dataProcess, tableName](int, QProcess::ExitStatus) {
+            QString output = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(dataProcess->readAllStandardOutput()));
+            setLoading(false);
+
+            if (output.contains("__DATA_ERROR__:")) {
+                QString error = output.section("__DATA_ERROR__:", 1).section('\n', 0, 0);
+                appendLog(QString("[-] Data query failed: %1").arg(error), "red");
+                QMessageBox::critical(this, "Query Error", QString("Failed to query data:\n\n%1").arg(error));
+                dataProcess->deleteLater();
+                return;
+            }
+
+            if (output.contains("__DATA_START__") && output.contains("__DATA_END__")) {
+                QString data = output.section("__DATA_START__", 1).section("__DATA_END__", 0, 0).trimmed();
+
+                // Save to file
+                QString safeTableName = QString(tableName).replace('.', '_');
+                QString filePath = QFileDialog::getSaveFileName(this, "Save Table Data",
+                    QDir::homePath() + QString("/%1_data.csv").arg(safeTableName),
+                    "CSV Files (*.csv);;All Files (*)");
+
+                if (!filePath.isEmpty()) {
+                    QFile file(filePath);
+                    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        QTextStream out(&file);
+                        // Convert pipe-delimited to comma-delimited for CSV
+                        QStringList lines = data.split('\n');
+                        for (const QString &line : lines) {
+                            if (line == "__HEADER_END__") continue;
+                            out << "\"" << line.split('|').join("\",\"") << "\"\n";
+                        }
+                        file.close();
+                        appendLog(QString("[+] Data saved to: %1").arg(filePath), "green");
+                    }
+                }
+            }
+
+            dataProcess->deleteLater();
+        });
+
+        QStringList args;
+        args << "-NoProfile" << "-NonInteractive" << "-Command" << script;
+        dataProcess->start("pwsh", args);
+    }
+}
+
+void SqlDatabaseWindow::executeCredentialDataQuery(const QString &tableName, int rowLimit) {
     setLoading(true);
-    appendLog(QString("[*] Downloading top %1 rows from %2...").arg(rowLimit).arg(tableName), "cyan");
+
+    QString server = getEffectiveServerFqdn();
+    QString database = getEffectiveDatabaseName();
+    QString username = sqlUsernameInput->text().trimmed();
+    QString password = sqlPasswordInput->text();
+
+    appendLog(QString("[*] Downloading top %1 rows from %2 via credentials...").arg(rowLimit).arg(tableName), "cyan");
+
+    QString query = QString("SELECT TOP %1 * FROM %2").arg(rowLimit).arg(tableName);
 
     QString script = QString(
         "$ErrorActionPreference='Stop'\n"
-        "$token = @'\n%1\n'@\n"
-        "$server = '%2'\n"
-        "$database = '%3'\n"
         "try {\n"
-        "  $conn = New-Object System.Data.SqlClient.SqlConnection\n"
-        "  $conn.ConnectionString = \"Server=tcp:$server,1433;Initial Catalog=$database;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;\"\n"
-        "  $conn.AccessToken = $token\n"
-        "  $conn.Open()\n"
+        "  $secPass = ConvertTo-SecureString '%1' -AsPlainText -Force\n"
+        "  $cred = New-Object System.Management.Automation.PSCredential('%2', $secPass)\n"
         "  Write-Output '__DATA_START__'\n"
-        "  $cmd = $conn.CreateCommand()\n"
-        "  $cmd.CommandText = 'SELECT TOP %4 * FROM %5'\n"
-        "  $reader = $cmd.ExecuteReader()\n"
-        "  # Output column headers\n"
-        "  $cols = @()\n"
-        "  for ($i = 0; $i -lt $reader.FieldCount; $i++) { $cols += $reader.GetName($i) }\n"
-        "  Write-Output ($cols -join '|')\n"
-        "  Write-Output '__HEADER_END__'\n"
-        "  while ($reader.Read()) {\n"
-        "    $row = @()\n"
-        "    for ($i = 0; $i -lt $reader.FieldCount; $i++) {\n"
-        "      $val = $reader.GetValue($i)\n"
-        "      if ($val -eq [DBNull]::Value) { $val = 'NULL' }\n"
-        "      $row += [string]$val -replace '\\|',';'\n"
+        "  $results = Invoke-SqlCmd -ServerInstance '%3' -Database '%4' -Credential $cred -Query '%5' -TrustServerCertificate -ConnectionTimeout 30 -QueryTimeout 120 -WarningAction SilentlyContinue 3>$null\n"
+        "  if ($results) {\n"
+        "    # Output headers\n"
+        "    $cols = $results[0].PSObject.Properties | Where-Object { $_.Name -notlike 'RowError*' -and $_.Name -notlike 'RowState*' -and $_.Name -notlike 'Table*' -and $_.Name -notlike 'HasErrors*' -and $_.Name -notlike 'ItemArray*' } | ForEach-Object { $_.Name }\n"
+        "    Write-Output ($cols -join '|')\n"
+        "    Write-Output '__HEADER_END__'\n"
+        "    foreach ($row in $results) {\n"
+        "      $vals = @()\n"
+        "      foreach ($col in $cols) {\n"
+        "        $val = $row.$col\n"
+        "        if ($null -eq $val -or $val -is [DBNull]) { $val = 'NULL' }\n"
+        "        $vals += [string]$val -replace '\\|',';'\n"
+        "      }\n"
+        "      Write-Output ($vals -join '|')\n"
         "    }\n"
-        "    Write-Output ($row -join '|')\n"
         "  }\n"
-        "  $reader.Close()\n"
-        "  $conn.Close()\n"
         "  Write-Output '__DATA_END__'\n"
         "} catch {\n"
         "  Write-Output \"__DATA_ERROR__:$($_.Exception.Message)\"\n"
         "}\n"
-    ).arg(token, currentServerFqdn, currentDbName, QString::number(rowLimit), tableName);
+    ).arg(
+        InputValidator::escapePsString(password),
+        InputValidator::escapePsString(username),
+        InputValidator::escapePsString(server),
+        InputValidator::escapePsString(database),
+        InputValidator::escapePsString(query)
+    );
 
     QProcess *dataProcess = new QProcess(this);
     dataProcess->setProcessChannelMode(QProcess::MergedChannels);
@@ -1107,7 +1719,6 @@ void SqlDatabaseWindow::downloadTableData() {
                 QFile file(filePath);
                 if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
                     QTextStream out(&file);
-                    // Convert pipe-delimited to comma-delimited for CSV
                     QStringList lines = data.split('\n');
                     for (const QString &line : lines) {
                         if (line == "__HEADER_END__") continue;
@@ -1125,6 +1736,11 @@ void SqlDatabaseWindow::downloadTableData() {
     QStringList args;
     args << "-NoProfile" << "-NonInteractive" << "-Command" << script;
     dataProcess->start("pwsh", args);
+
+    if (!dataProcess->waitForStarted(5000)) {
+        setLoading(false);
+        appendLog("[-] Failed to start PowerShell process", "red");
+    }
 }
 
 // ============================================================================
@@ -1196,6 +1812,10 @@ void SqlDatabaseWindow::cancelRequests() {
         }
     }
     activeReplies.clear();
+    if (pwshProcess && pwshProcess->state() != QProcess::NotRunning) {
+        pwshProcess->kill();
+        appendLog("[*] PowerShell process terminated", "yellow");
+    }
     setLoading(false);
     appendLog("[*] Requests cancelled", "yellow");
 }

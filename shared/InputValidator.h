@@ -55,6 +55,14 @@ public:
     static bool isValidAzureResource(const QString &url);
 
     /**
+     * Escape string for safe use inside PowerShell single-quoted strings.
+     * Doubles single quotes, strips null bytes and newlines.
+     * @param input The input to escape
+     * @return PowerShell-safe string (wrap in single quotes when using)
+     */
+    static QString escapePsString(const QString &input);
+
+    /**
      * Sanitize input string - remove potentially dangerous characters
      * @param input The input to sanitize
      * @return Sanitized string
