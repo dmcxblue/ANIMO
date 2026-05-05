@@ -80,14 +80,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 print("[*] Detected JWT-like token (starts with 'eyJ')")
                 print("="*80)
 
-                # Display single-line version for easy copying
-                single_line_token = decoded_body.replace('\n', '').replace('\r', '').strip()
-                print(f"\n{'='*80}")
-                print("[COPY-FRIENDLY FORMAT - Single Line]")
-                print("="*80)
-                print(single_line_token)
-                print("="*80)
-
                 # Try to decode JWT header and extract tenant info
                 try:
                     parts = decoded_body.split('.')
