@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include <atomic>
 #include <QtWebEngineWidgets/QWebEngineView>
 #include <QTextEdit>
 #include <QComboBox>
@@ -7,6 +8,7 @@
 #include <QFontComboBox>
 #include <QSpinBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QTimer>
 #include <QProgressBar>
 #include <QNetworkAccessManager>
@@ -78,6 +80,10 @@ private slots:
     void loadDirectChatsSkype();
     void onChatSelectedSkype(int idx);
     void loadChatMessagesSkype();
+
+    // Chat filtering
+    void filterChats();
+    void onChatFilterChanged();
 
     // Messaging
     void sendMessage();
@@ -158,6 +164,8 @@ private:
 
     // UI - Direct Chats mode (shared between Graph and Skype)
     QComboBox *chatDropdown;
+    QComboBox *chatFilterType;   // Filter: All, 1:1, Group, Meeting
+    QLineEdit *chatSearchBox;    // Quick search filter
 
     // UI - Message display
     QWebEngineView *htmlViewer;
@@ -210,6 +218,16 @@ private:
     QJsonArray cachedMessages;
     bool cachedIsSkypeFormat = false;
 
+    // Cached chats for filtering
+    struct ChatInfo {
+        QString id;
+        QString displayText;   // Full display text with type icon
+        QString topic;         // Just the topic/name
+        QString type;          // "oneOnOne", "group", "meeting"
+        qint64 lastActivity;   // Timestamp for sorting
+    };
+    QList<ChatInfo> cachedChats;
+
     // Chat members for mentions
     struct ChatMember {
         QString id;
@@ -241,5 +259,5 @@ private:
     // Cancel support
     QPushButton *cancelBtn;
     QList<QNetworkReply*> activeReplies;
-    bool cancelRequested = false;
+    std::atomic<bool> cancelRequested{false};
 };

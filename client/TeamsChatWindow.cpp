@@ -58,6 +58,12 @@ TeamsChatWindow::TeamsChatWindow(const QString &accessTok, const QString &refres
 }
 
 TeamsChatWindow::~TeamsChatWindow() {
+    // Stop poll timer first to prevent new requests during destruction
+    if (pollTimer) {
+        pollTimer->stop();
+        pollTimer->disconnect();
+    }
+
     // Disconnect ALL network replies to prevent callbacks during destruction
     if (net) {
         const auto replies = net->findChildren<QNetworkReply*>();
@@ -159,18 +165,40 @@ void TeamsChatWindow::setupUi() {
     teamsRow->addStretch();
     layout->addLayout(teamsRow);
 
-    // Direct Chats dropdown
+    // Direct Chats dropdown with filter controls
     auto *chatRow = new QHBoxLayout();
     chatRow->addWidget(new QLabel("Chat:"));
     chatDropdown = new QComboBox();
-    chatDropdown->setMinimumWidth(500);
+    chatDropdown->setMinimumWidth(400);
     // Connect will be dynamic based on mode
     chatRow->addWidget(chatDropdown);
+
+    // Filter by type
+    chatFilterType = new QComboBox();
+    chatFilterType->addItem("All Types", "all");
+    chatFilterType->addItem("1:1 Chats", "oneOnOne");
+    chatFilterType->addItem("Group Chats", "group");
+    chatFilterType->addItem("Meetings", "meeting");
+    chatFilterType->setFixedWidth(110);
+    connect(chatFilterType, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &TeamsChatWindow::onChatFilterChanged);
+    chatRow->addWidget(chatFilterType);
+
+    // Search box
+    chatSearchBox = new QLineEdit();
+    chatSearchBox->setPlaceholderText("Search chats...");
+    chatSearchBox->setFixedWidth(150);
+    chatSearchBox->setClearButtonEnabled(true);
+    connect(chatSearchBox, &QLineEdit::textChanged, this, &TeamsChatWindow::filterChats);
+    chatRow->addWidget(chatSearchBox);
+
     chatRow->addStretch();
     layout->addLayout(chatRow);
 
     // Initially show Teams mode, hide Direct Chats
     chatDropdown->setVisible(false);
+    chatFilterType->setVisible(false);
+    chatSearchBox->setVisible(false);
 
     htmlViewer = new QWebEngineView();
     htmlViewer->setPage(new ExternalLinkPage(htmlViewer));
@@ -336,8 +364,13 @@ void TeamsChatWindow::clearConversationUI() {
     // Clear cached data
     cachedMessages = QJsonArray();
     cachedIsSkypeFormat = false;
+    cachedChats.clear();
     chatMembers.clear();
     pendingMentions.clear();
+
+    // Reset filters
+    if (chatFilterType) chatFilterType->setCurrentIndex(0);
+    if (chatSearchBox) chatSearchBox->clear();
 
     htmlViewer->setHtml("<html><body style='background:#121212;color:#888;padding:20px;'>"
                         "<p>Select a team/channel or chat to view messages.</p></body></html>");
@@ -356,6 +389,8 @@ void TeamsChatWindow::onModeChanged(int index) {
     teamDropdown->setVisible(isTeamsMode);
     channelDropdown->setVisible(isTeamsMode);
     chatDropdown->setVisible(isDirectMode);
+    chatFilterType->setVisible(isDirectMode);
+    chatSearchBox->setVisible(isDirectMode);
 
     // Reconnect appropriate signal based on mode
     if (currentMode == Mode::DirectChatsGraph) {
@@ -584,8 +619,14 @@ void TeamsChatWindow::loadTeams() {
 
     QNetworkRequest req = bearerJson(url, accessToken);
     QNetworkReply *reply = net->get(req);
+    if (!reply) {
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         setLoading(false);
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -655,8 +696,14 @@ void TeamsChatWindow::onTeamSelected(int idx) {
 
     QNetworkRequest req = bearerJson(url, accessToken);
     QNetworkReply *reply = net->get(req);
+    if (!reply) {
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         setLoading(false);
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -792,20 +839,31 @@ void TeamsChatWindow::loadDirectChatsGraph() {
             return;
         }
 
+        // Clear cached chats
+        cachedChats.clear();
+
         for (const QJsonValue &v : chats) {
             QJsonObject chat = v.toObject();
             QString chatId = chat.value("id").toString();
             QString chatType = chat.value("chatType").toString();
-            QString displayName = getChatDisplayName(chat);
+            QString topic = getChatDisplayName(chat);
 
+            // Get last message timestamp for sorting
+            qint64 lastActivity = 0;
             QJsonObject lastMsg = chat.value("lastMessagePreview").toObject();
-            QString preview = lastMsg.value("body").toObject().value("content").toString();
-            if (!preview.isEmpty()) {
-                preview.remove(QRegularExpression("<[^>]*>"));
-                if (preview.length() > 40) {
-                    preview = preview.left(40) + "...";
-                }
-                displayName += QString(" - \"%1\"").arg(preview);
+            QString lastMsgTime = lastMsg.value("createdDateTime").toString();
+            if (!lastMsgTime.isEmpty()) {
+                QDateTime dt = QDateTime::fromString(lastMsgTime, Qt::ISODate);
+                if (dt.isValid()) lastActivity = dt.toMSecsSinceEpoch();
+            }
+
+            // For meetings, add date to distinguish recurring instances
+            QString displayTopic = topic;
+            bool isMeeting = (chatType == "meeting");
+            if (isMeeting && lastActivity > 0) {
+                QDateTime activityTime = QDateTime::fromMSecsSinceEpoch(lastActivity);
+                QString dateStr = activityTime.toString("MMM d");
+                displayTopic = QString("%1 (%2)").arg(topic, dateStr);
             }
 
             QString typeIcon;
@@ -813,16 +871,30 @@ void TeamsChatWindow::loadDirectChatsGraph() {
             else if (chatType == "group") typeIcon = "[Group] ";
             else if (chatType == "meeting") typeIcon = "[Meeting] ";
 
-            QVariantMap chatData;
-            chatData["id"] = chatId;
-            chatData["type"] = chatType;
-
-            chatDropdown->addItem(typeIcon + displayName, QVariant::fromValue(chatData));
+            // Cache the chat info
+            ChatInfo info;
+            info.id = chatId;
+            info.topic = topic;
+            info.displayText = typeIcon + displayTopic;
+            info.type = chatType;
+            info.lastActivity = lastActivity;
+            cachedChats.append(info);
         }
+
+        // Sort by last activity (most recent first)
+        std::sort(cachedChats.begin(), cachedChats.end(),
+            [](const ChatInfo &a, const ChatInfo &b) {
+                return a.lastActivity > b.lastActivity;
+            });
+
+        // Populate dropdown using filter
+        filterChats();
 
         reply->deleteLater();
         QMessageBox::information(this, "Chats Loaded",
-            QString("Found %1 chat(s). Select one to view messages.").arg(chats.size()));
+            QString("Found %1 chat(s). Select one to view messages.\n\n"
+                    "Use the filter dropdown and search box to narrow results.")
+                .arg(cachedChats.size()));
     });
 }
 
@@ -833,9 +905,16 @@ void TeamsChatWindow::onChatSelectedGraph(int idx) {
         return;
     }
 
-    QVariantMap chatData = chatDropdown->currentData().toMap();
-    activeChatId = chatData.value("id").toString();
-    activeChatType = chatData.value("type").toString();
+    activeChatId = chatDropdown->currentData().toString();
+
+    // Find the chat type from cached data
+    activeChatType.clear();
+    for (const ChatInfo &info : cachedChats) {
+        if (info.id == activeChatId) {
+            activeChatType = info.type;
+            break;
+        }
+    }
 
     if (activeChatId.isEmpty()) {
         pollTimer->stop();
@@ -933,16 +1012,52 @@ void TeamsChatWindow::loadDirectChatsSkype() {
                 return;
             }
 
-            int validCount = 0;
+            // Clear cached chats
+            cachedChats.clear();
+
             for (const QJsonValue &v : conversations) {
                 QJsonObject convo = v.toObject();
                 QString convoId = convo.value("id").toString();
                 if (convoId.isEmpty()) continue;
 
-                // Get topic from properties
-                QString topic = convo.value("properties").toObject().value("topic").toString();
+                QJsonObject props = convo.value("properties").toObject();
+                QJsonObject threadProps = convo.value("threadProperties").toObject();
 
-                // If no topic, try to build a name from members
+                // Get last activity timestamp for sorting
+                qint64 lastActivity = 0;
+                QString lastUpdated = props.value("lastUpdatedTime").toString();
+                if (lastUpdated.isEmpty()) {
+                    lastUpdated = convo.value("version").toString();
+                }
+                if (!lastUpdated.isEmpty()) {
+                    // Parse ISO timestamp or numeric version
+                    if (lastUpdated.contains("T")) {
+                        QDateTime dt = QDateTime::fromString(lastUpdated.left(19), "yyyy-MM-ddTHH:mm:ss");
+                        if (dt.isValid()) lastActivity = dt.toMSecsSinceEpoch();
+                    } else {
+                        lastActivity = lastUpdated.toLongLong();
+                    }
+                }
+
+                // Get topic from multiple possible locations
+                QString topic = props.value("topic").toString();
+                if (topic.isEmpty()) {
+                    topic = threadProps.value("topic").toString();
+                }
+
+                // Determine type from ID format
+                bool isMeeting = convoId.contains(":meeting_");
+                bool isGroup = convoId.contains(":19:");
+
+                // For meetings, try to get the meeting subject from threadProperties
+                if (topic.isEmpty() && isMeeting) {
+                    topic = threadProps.value("meetingTitle").toString();
+                    if (topic.isEmpty()) {
+                        topic = threadProps.value("subject").toString();
+                    }
+                }
+
+                // Try to build a name from members
                 if (topic.isEmpty()) {
                     QJsonArray members = convo.value("members").toArray();
                     QStringList memberNames;
@@ -954,16 +1069,30 @@ void TeamsChatWindow::loadDirectChatsSkype() {
                         // Skip the current user (usually has "User" role)
                         if (role == "User") continue;
 
-                        // Get display name or friendly name
+                        // Try multiple fields for display name
                         QString displayName = member.value("friendlyName").toString();
+                        if (displayName.isEmpty()) {
+                            displayName = member.value("displayName").toString();
+                        }
                         if (displayName.isEmpty()) {
                             displayName = member.value("userPrincipalName").toString();
                         }
 
-                        if (!displayName.isEmpty() && !displayName.startsWith("8:orgid:")) {
+                        // Also try parsing the member ID for display name
+                        if (displayName.isEmpty()) {
+                            QString memberId = member.value("id").toString();
+                            if (memberId.contains("@")) {
+                                displayName = memberId.section('@', 0, 0);
+                            }
+                        }
+
+                        if (!displayName.isEmpty()) {
+                            // Skip raw org IDs
+                            if (displayName.startsWith("8:orgid:")) continue;
+                            if (displayName.startsWith("28:")) continue;
+
                             // Clean up the display name
                             if (displayName.contains('@')) {
-                                // If it's an email, just use the part before @
                                 displayName = displayName.section('@', 0, 0);
                             }
                             memberNames << displayName;
@@ -980,42 +1109,118 @@ void TeamsChatWindow::loadDirectChatsSkype() {
                     }
                 }
 
-                // Last resort fallback
+                // Try last message preview for context
                 if (topic.isEmpty()) {
-                    // Determine a better fallback based on conversation type
-                    if (convoId.contains(":meeting_")) {
-                        topic = "Meeting Chat";
-                    } else if (convoId.contains(":19:")) {
-                        topic = "Group Chat";
-                    } else {
-                        topic = "1:1 Chat";
+                    QJsonObject lastMsg = convo.value("lastMessage").toObject();
+                    QString preview = lastMsg.value("content").toString();
+                    QString senderName = lastMsg.value("imdisplayname").toString();
+                    if (!preview.isEmpty()) {
+                        preview.remove(QRegularExpression("<[^>]*>"));
+                        if (preview.length() > 30) {
+                            preview = preview.left(30) + "...";
+                        }
+                        if (!senderName.isEmpty()) {
+                            topic = QString("%1: %2").arg(senderName, preview);
+                        } else {
+                            topic = preview;
+                        }
                     }
                 }
 
-                // Determine type from ID format
-                QString typeIcon;
-                if (convoId.contains(":meeting_")) {
-                    typeIcon = "[Meeting] ";
-                } else if (convoId.contains(":19:")) {
-                    typeIcon = "[Group] ";
-                } else {
-                    typeIcon = "[1:1] ";
+                // Last resort fallback with ID hint
+                if (topic.isEmpty()) {
+                    if (isMeeting) {
+                        topic = "Meeting Chat";
+                    } else if (isGroup) {
+                        topic = "Group Chat";
+                    } else {
+                        QString shortId = convoId.mid(convoId.lastIndexOf(':') + 1).left(8);
+                        topic = QString("Chat (%1)").arg(shortId);
+                    }
                 }
 
-                chatDropdown->addItem(typeIcon + topic, convoId);
-                validCount++;
+                // For meetings, add date to distinguish recurring instances
+                QString displayTopic = topic;
+                if (isMeeting && lastActivity > 0) {
+                    QDateTime activityTime = QDateTime::fromMSecsSinceEpoch(lastActivity);
+                    QString dateStr = activityTime.toString("MMM d");
+                    displayTopic = QString("%1 (%2)").arg(topic, dateStr);
+                }
+
+                QString typeStr = isMeeting ? "meeting" : (isGroup ? "group" : "oneOnOne");
+                QString typeIcon = isMeeting ? "[Meeting] " : (isGroup ? "[Group] " : "[1:1] ");
+
+                // Cache the chat info
+                ChatInfo info;
+                info.id = convoId;
+                info.topic = topic;
+                info.displayText = typeIcon + displayTopic;
+                info.type = typeStr;
+                info.lastActivity = lastActivity;
+                cachedChats.append(info);
             }
+
+            // Sort by last activity (most recent first)
+            std::sort(cachedChats.begin(), cachedChats.end(),
+                [](const ChatInfo &a, const ChatInfo &b) {
+                    return a.lastActivity > b.lastActivity;
+                });
+
+            // Populate dropdown
+            filterChats();
 
             reply->deleteLater();
 
-            if (validCount > 0) {
+            if (!cachedChats.isEmpty()) {
                 QMessageBox::information(this, "Chats Loaded (Skype API)",
-                    QString("Found %1 conversation(s). Select one to view messages.").arg(validCount));
+                    QString("Found %1 conversation(s). Select one to view messages.\n\n"
+                            "Use the filter dropdown and search box to narrow results.")
+                        .arg(cachedChats.size()));
             } else {
                 QMessageBox::information(this, "No Chats", "No valid conversations found.");
             }
         });
     });
+}
+
+void TeamsChatWindow::filterChats() {
+    if (cachedChats.isEmpty()) return;
+
+    QString filterType = chatFilterType->currentData().toString();
+    QString searchText = chatSearchBox->text().toLower().trimmed();
+
+    // Temporarily block signals to avoid triggering selection
+    chatDropdown->blockSignals(true);
+    chatDropdown->clear();
+
+    int matchCount = 0;
+    for (const ChatInfo &chat : cachedChats) {
+        // Apply type filter
+        if (filterType != "all" && chat.type != filterType) {
+            continue;
+        }
+
+        // Apply search filter
+        if (!searchText.isEmpty() && !chat.topic.toLower().contains(searchText)) {
+            continue;
+        }
+
+        chatDropdown->addItem(chat.displayText, chat.id);
+        matchCount++;
+    }
+
+    chatDropdown->blockSignals(false);
+
+    // Update UI hint if filtered
+    if (matchCount < cachedChats.size()) {
+        chatDropdown->setToolTip(QString("Showing %1 of %2 chats").arg(matchCount).arg(cachedChats.size()));
+    } else {
+        chatDropdown->setToolTip("");
+    }
+}
+
+void TeamsChatWindow::onChatFilterChanged() {
+    filterChats();
 }
 
 void TeamsChatWindow::onChatSelectedSkype(int idx) {
@@ -1108,7 +1313,11 @@ void TeamsChatWindow::renderMessagesHtml(const QJsonArray &messages, bool isChan
 
         if (isSkypeFormat) {
             // Skype API format
-            sender = msg.value("imdisplayname").toString("Unknown");
+            sender = msg.value("imdisplayname").toString();
+            if (sender.isEmpty()) {
+                // Try alternate fields
+                sender = msg.value("displayName").toString();
+            }
             content = msg.value("content").toString();
             messageId = msg.value("id").toString();
 
@@ -1133,9 +1342,55 @@ void TeamsChatWindow::renderMessagesHtml(const QJsonArray &messages, bool isChan
                 }
             }
 
-            // Check if it's a system message
+            // Check message type for system events
             QString msgType = msg.value("messagetype").toString();
-            isSystem = msgType.contains("Event") || msgType.contains("System") || sender == "Unknown";
+            isSystem = msgType.contains("Event") || msgType.contains("ThreadActivity") ||
+                       msgType.contains("RichText/Media_CallRecording") ||
+                       msgType == "ControlClear" || sender.isEmpty();
+
+            // Handle different system message types
+            if (isSystem) {
+                // Call events - parse and format nicely
+                if (msgType.contains("Event/Call") || msgType == "Event/Call" ||
+                    content.contains("callEnded") || content.contains("callLog")) {
+                    // Extract meeting title if present
+                    QRegularExpression meetingRx("([A-Za-z0-9 ]+(?:Huddle|Meeting|Standup|Sync|Call)[^0-9]*)");
+                    QRegularExpressionMatch match = meetingRx.match(content);
+                    if (match.hasMatch()) {
+                        QString meetingName = match.captured(1).trimmed();
+                        content = QString("Call ended: %1").arg(meetingName);
+                    } else {
+                        content = "Call ended";
+                    }
+                    sender = "System";
+                }
+                // Thread roster changes
+                else if (msgType.contains("ThreadActivity/AddMember")) {
+                    content = "A member was added to the conversation";
+                    sender = "System";
+                }
+                else if (msgType.contains("ThreadActivity/DeleteMember")) {
+                    content = "A member left the conversation";
+                    sender = "System";
+                }
+                else if (msgType.contains("ThreadActivity/TopicUpdate")) {
+                    content = "Conversation topic was updated";
+                    sender = "System";
+                }
+                // Skip raw metadata dumps (long strings with IDs and timestamps concatenated)
+                else if (content.length() > 200 && content.contains("orgid:") &&
+                         content.count(':') > 10) {
+                    continue; // Skip this message entirely
+                }
+                // Other system messages - show a cleaner version
+                else if (sender.isEmpty()) {
+                    sender = "System";
+                    // Clean up content if it looks like raw data
+                    if (content.contains("8:orgid:") || content.contains("28:")) {
+                        content = "[System event]";
+                    }
+                }
+            }
 
         } else {
             // Graph API format
@@ -1218,6 +1473,11 @@ void TeamsChatWindow::renderMessagesHtml(const QJsonArray &messages, bool isChan
 
         // Skip empty messages
         if (content.trimmed().isEmpty()) continue;
+
+        // Ensure sender is never empty
+        if (sender.isEmpty()) {
+            sender = "Unknown";
+        }
 
         QString msgClass = isSystem ? "msg system" : "msg";
 
