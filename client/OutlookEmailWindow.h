@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include <atomic>
 #include <QListWidget>
 #include <QLineEdit>
 #include <QComboBox>
@@ -127,5 +128,5 @@ private:
     // Cancel support
     QPushButton *cancelBtn;
     QList<QNetworkReply*> activeReplies;
-    bool cancelRequested = false;
+    std::atomic<bool> cancelRequested{false};
 };

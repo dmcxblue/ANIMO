@@ -2,6 +2,7 @@
 #define RUNBOOKEXPLORERWINDOW_H
 
 #include <QWidget>
+#include <atomic>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTreeWidget>
@@ -74,7 +75,7 @@ private:
     // Cancel support
     QPushButton *cancelBtn;
     QList<QNetworkReply*> activeReplies;
-    bool cancelRequested = false;
+    std::atomic<bool> cancelRequested{false};
 };
 
 #endif // RUNBOOKEXPLORERWINDOW_H

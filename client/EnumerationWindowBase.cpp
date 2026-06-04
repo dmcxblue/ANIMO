@@ -5,6 +5,7 @@
 #include "ErrorDialog.h"
 
 #include <QSplitter>
+#include <QMessageBox>
 
 EnumerationWindowBase::EnumerationWindowBase(QWidget *parent)
     : QWidget(parent),
@@ -242,9 +243,18 @@ bool EnumerationWindowBase::validateToken(const QString &token, const QString &r
     if (!requiredAudience.isEmpty()) {
         QString audience = NetworkHelper::extractTokenAudience(token);
         if (!audience.contains(requiredAudience, Qt::CaseInsensitive)) {
-            ErrorDialog::showAuthenticationError(this,
-                NetworkHelper::getAudienceMismatchError(requiredAudience, audience));
-            return false;
+            QString msg = QString("Token audience mismatch: this operation expects '%1' "
+                                  "but your token is for '%2'.\n\n"
+                                  "The API call may fail with a 401 error.\n"
+                                  "Proceed anyway?")
+                          .arg(requiredAudience, audience.isEmpty() ? "unknown" : audience);
+            auto result = QMessageBox::warning(this, "Token Audience Mismatch",
+                                               msg, QMessageBox::Yes | QMessageBox::No);
+            if (result != QMessageBox::Yes) {
+                return false;
+            }
+            logWarning(QString("Proceeding with mismatched token (expected %1, got %2)")
+                       .arg(requiredAudience, audience));
         }
     }
 
@@ -282,14 +292,42 @@ void EnumerationWindowBase::autoFetchTokens()
         return;
     }
 
-    logInfo("Fetching Graph token for selected user...");
-    userSelector->fetchToken("https://graph.microsoft.com", [this](bool success, const QString &token, const QString &error) {
+    // Derive a short label from the resource URL for log messages
+    QString label = m_targetResource;
+    if (label.contains("graph.microsoft.com")) label = "Graph";
+    else if (label.contains("management.azure.com")) label = "Management";
+    else if (label.contains("vault.azure.net")) label = "Key Vault";
+
+    logInfo(QString("Fetching %1 token for selected user...").arg(label));
+    userSelector->fetchToken(m_targetResource, [this, label](bool success, const QString &token, const QString &error) {
         if (success) {
             if (tokenInput) tokenInput->setText(token);
             updateTokenStatus();
-            logSuccess("Graph token acquired");
+            logSuccess(QString("%1 token acquired").arg(label));
         } else {
-            logError(QString("Failed to fetch token: %1").arg(error));
+            logError(QString("Failed to fetch %1 token: %2").arg(label, error));
+            // If we failed and were looking for Graph, try Management as fallback (and vice versa)
+            QString fallback;
+            QString fallbackLabel;
+            if (m_targetResource.contains("graph.microsoft.com")) {
+                fallback = QStringLiteral("https://management.azure.com");
+                fallbackLabel = "Management";
+            } else if (m_targetResource.contains("management.azure.com")) {
+                fallback = QStringLiteral("https://graph.microsoft.com");
+                fallbackLabel = "Graph";
+            }
+            if (!fallback.isEmpty()) {
+                logInfo(QString("Trying fallback: fetching %1 token...").arg(fallbackLabel));
+                userSelector->fetchToken(fallback, [this, fallbackLabel](bool ok, const QString &tok, const QString &err) {
+                    if (ok) {
+                        if (tokenInput) tokenInput->setText(tok);
+                        updateTokenStatus();
+                        logWarning(QString("Using %1 token (audience may not match this operation)").arg(fallbackLabel));
+                    } else {
+                        logError(QString("Fallback also failed: %1").arg(err));
+                    }
+                });
+            }
         }
     });
 }

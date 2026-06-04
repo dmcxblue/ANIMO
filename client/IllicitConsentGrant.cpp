@@ -51,6 +51,16 @@ IllicitConsentGrant::IllicitConsentGrant(DashboardWindow *dashboard, QWidget *pa
     );
     layout->addWidget(scopeInput);
 
+    // Listener port
+    auto *portLayout = new QHBoxLayout();
+    portLayout->addWidget(new QLabel("Listener Port"));
+    portSpinBox = new QSpinBox();
+    portSpinBox->setRange(1024, 65535);
+    portSpinBox->setValue(5000);
+    portLayout->addWidget(portSpinBox);
+    portLayout->addStretch();
+    layout->addLayout(portLayout);
+
     // Session creation toggle
     createSessionCheckbox = new QCheckBox("Create session from captured token");
     createSessionCheckbox->setChecked(false);
@@ -75,6 +85,27 @@ IllicitConsentGrant::IllicitConsentGrant(DashboardWindow *dashboard, QWidget *pa
     setLayout(layout);
 
     wireTransport();
+}
+
+IllicitConsentGrant::~IllicitConsentGrant() {
+    // Clean up TCP server and pending connections
+    if (tcpServer) {
+        tcpServer->close();
+        // Disconnect and abort any pending socket connections
+        const auto sockets = tcpServer->findChildren<QTcpSocket*>();
+        for (QTcpSocket *socket : sockets) {
+            socket->disconnect();
+            socket->abort();
+        }
+    }
+    // Clean up any pending network replies
+    if (netManager) {
+        const auto replies = netManager->findChildren<QNetworkReply*>();
+        for (QNetworkReply *reply : replies) {
+            reply->disconnect();
+            reply->abort();
+        }
+    }
 }
 
 void IllicitConsentGrant::handleStart() {
@@ -154,10 +185,11 @@ void IllicitConsentGrant::startHttpServer() {
         });
     });
 
-    if (!tcpServer->listen(QHostAddress::Any, 5000)) {
-        tokenOutput->append("<pre>Listener error: Failed to bind port 5000</pre><hr>");
+    quint16 port = static_cast<quint16>(portSpinBox->value());
+    if (!tcpServer->listen(QHostAddress::Any, port)) {
+        tokenOutput->append(QString("<pre>Listener error: Failed to bind port %1</pre><hr>").arg(port));
     } else {
-        tokenOutput->append("<pre>Listener started on http://0.0.0.0:5000</pre><hr>");
+        tokenOutput->append(QString("<pre>Listener started on http://0.0.0.0:%1</pre><hr>").arg(port));
     }
 }
 

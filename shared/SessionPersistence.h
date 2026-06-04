@@ -39,7 +39,6 @@ public:
         QString defaultDomain;
         QString resource;
         QString refreshToken;      // Encrypted at rest
-        QString accessToken;       // Not saved - re-acquired via refresh
         QDateTime savedAt;
         QDateTime lastRefreshed;
         bool autoRestore = true;

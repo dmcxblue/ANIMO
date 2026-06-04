@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <atomic>
 #include <QNetworkAccessManager>
 
 class QLineEdit;
@@ -33,6 +34,6 @@ private:
     QPushButton *cancelButton;
     QSpinBox *delaySpinBox;
     QTextEdit *output;
-    bool cancelRequested = false;
+    std::atomic<bool> cancelRequested{false};
     bool sprayRunning = false;
 };

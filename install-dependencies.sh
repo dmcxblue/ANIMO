@@ -19,6 +19,7 @@ sudo apt-get install -y --no-install-recommends \
   qt6-websockets-dev \
   libqt6sql6 \
   libqt6sql6-sqlite \
+  libssl-dev \
   snapd
 
 sudo snap install powershell --classic

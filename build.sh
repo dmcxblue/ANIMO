@@ -3,7 +3,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 
-rm -rf data
+# Clean data directory but preserve database
+if [ -d "$ROOT_DIR/data" ]; then
+    find "$ROOT_DIR/data" -type f ! -name "*.db" ! -name "*.db-wal" ! -name "*.db-shm" -delete 2>/dev/null || true
+fi
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"

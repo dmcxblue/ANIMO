@@ -98,6 +98,9 @@ QString SessionPersistence::decrypt(const QString &ciphertext) const {
 
     // Fallback: try legacy XOR decryption for old files
     QByteArray data = QByteArray::fromBase64(ciphertext.toUtf8());
+    if (data.isEmpty()) {
+        return QString();
+    }
     QByteArray key = m_encryptionKey.toUtf8();
     QByteArray result;
     result.reserve(data.size());
@@ -129,7 +132,7 @@ bool SessionPersistence::saveSession(const SavedSession &session) {
             obj["tenantId"] = session.tenantId;
             obj["defaultDomain"] = session.defaultDomain;
             obj["resource"] = session.resource;
-            obj["refreshToken"] = encrypt(session.refreshToken);
+            obj["refreshToken"] = session.refreshToken;
             obj["savedAt"] = session.savedAt.toString(Qt::ISODate);
             obj["lastRefreshed"] = session.lastRefreshed.toString(Qt::ISODate);
             obj["autoRestore"] = session.autoRestore;
@@ -147,7 +150,7 @@ bool SessionPersistence::saveSession(const SavedSession &session) {
         obj["tenantId"] = session.tenantId;
         obj["defaultDomain"] = session.defaultDomain;
         obj["resource"] = session.resource;
-        obj["refreshToken"] = encrypt(session.refreshToken);
+        obj["refreshToken"] = session.refreshToken;
         obj["savedAt"] = session.savedAt.toString(Qt::ISODate);
         obj["lastRefreshed"] = session.lastRefreshed.toString(Qt::ISODate);
         obj["autoRestore"] = session.autoRestore;
@@ -192,7 +195,23 @@ QList<SessionPersistence::SavedSession> SessionPersistence::loadSavedSessions() 
         sess.tenantId = obj.value("tenantId").toString();
         sess.defaultDomain = obj.value("defaultDomain").toString();
         sess.resource = obj.value("resource").toString();
-        sess.refreshToken = decrypt(obj.value("refreshToken").toString());
+        sess.refreshToken = obj.value("refreshToken").toString();
+
+        // Migration: old sessions had per-token encryption; try decrypting if not a raw token.
+        // Azure refresh tokens start with "0." (e.g., "0.AVY...") and are typically 1000+ chars.
+        // Encrypted base64 data would not start with "0." and would be shorter.
+        auto looksLikeRefreshToken = [](const QString &s) {
+            return s.startsWith(QStringLiteral("0.")) && s.length() > 500;
+        };
+
+        if (!sess.refreshToken.isEmpty() && !looksLikeRefreshToken(sess.refreshToken)) {
+            QString decrypted = decrypt(sess.refreshToken);
+            if (!decrypted.isEmpty() && decrypted != sess.refreshToken && looksLikeRefreshToken(decrypted)) {
+                sess.refreshToken = decrypted;
+                LOG_INFO("SessionPersistence", QString("Migrated legacy encrypted token for session %1").arg(sess.sessionId.left(8)));
+            }
+        }
+
         sess.savedAt = QDateTime::fromString(obj.value("savedAt").toString(), Qt::ISODate);
         sess.lastRefreshed = QDateTime::fromString(obj.value("lastRefreshed").toString(), Qt::ISODate);
         sess.autoRestore = obj.value("autoRestore").toBool(true);

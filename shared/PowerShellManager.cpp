@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
@@ -81,6 +82,12 @@ QString PowerShellManager::getPwshPath() {
 }
 
 QString PowerShellManager::sessionScriptsDir(const QString &sessionId) {
+    // Defense-in-depth: reject sessionIds that could cause path traversal
+    static const QRegularExpression safeId(QStringLiteral("^[a-zA-Z0-9_\\-]{1,64}$"));
+    if (!safeId.match(sessionId).hasMatch()) {
+        qWarning() << "[PowerShellManager] Invalid sessionId rejected:" << sessionId.left(20);
+        return QString();
+    }
     const QString dir = QString("data/sessions/%1").arg(sessionId);
     QDir().mkpath(dir);
     return dir;

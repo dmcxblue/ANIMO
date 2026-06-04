@@ -2,6 +2,7 @@
 #define AZUREENUMWINDOW_H
 
 #include <QWidget>
+#include <atomic>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTreeWidget>
@@ -60,7 +61,7 @@ private:
     QJsonArray subscriptions;
     QString currentSubscriptionId;
     QList<QNetworkReply*> activeReplies;
-    bool cancelRequested = false;
+    std::atomic<bool> cancelRequested{false};
 };
 
 #endif // AZUREENUMWINDOW_H

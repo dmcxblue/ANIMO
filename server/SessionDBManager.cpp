@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QCoreApplication>
 #include <QFileInfo>
+#include <QMutexLocker>
 
 static const char* kMainConn = "main_sessions";
 
@@ -209,6 +210,7 @@ bool SessionDBManager::addSessionToMainDB(const QString &sessionId,
                                           const QString &defaultDomain,
                                           const QString &resource)
 {
+    QMutexLocker locker(&m_mutex);
     if (!initMainDB()) return false;
 
     QSqlQuery q(m_mainDb);
@@ -286,13 +288,14 @@ bool SessionDBManager::createSessionDB(const QString &sessionId) {
         qWarning() << "[DB] open per-session failed:" << db.lastError().text();
         return false;
     }
-    { QSqlQuery p(db); p.exec("PRAGMA journal_mode=DELETE;"); p.exec("PRAGMA synchronous=NORMAL;"); p.exec("PRAGMA busy_timeout=5000;"); }
+    { QSqlQuery p(db); p.exec("PRAGMA journal_mode=WAL;"); p.exec("PRAGMA synchronous=NORMAL;"); p.exec("PRAGMA busy_timeout=10000;"); }
     QSqlQuery q(db);
     if (!q.exec(
         "CREATE TABLE IF NOT EXISTS history_v2 ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " timestamp   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         " command     TEXT NOT NULL,"
+        " cmd_id      TEXT DEFAULT NULL,"
         " status      TEXT NOT NULL DEFAULT 'ok',"
         " exit_code   INTEGER DEFAULT NULL,"
         " stdout_text TEXT NOT NULL DEFAULT '',"
@@ -300,6 +303,15 @@ bool SessionDBManager::createSessionDB(const QString &sessionId) {
         " duration_ms INTEGER DEFAULT NULL"
         ")"
     )) { qWarning() << "[DB] create history_v2 failed:" << q.lastError().text(); return false; }
+
+    // Migration: add cmd_id column if it doesn't exist
+    QSqlQuery mig(db);
+    if (!mig.exec("ALTER TABLE history_v2 ADD COLUMN cmd_id TEXT DEFAULT NULL")) {
+        QString err = mig.lastError().text();
+        if (!err.contains("duplicate column", Qt::CaseInsensitive)) {
+            qWarning() << "[DB] Migration warning (add cmd_id):" << err;
+        }
+    }
     q.exec(
         "CREATE TABLE IF NOT EXISTS history ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -312,8 +324,11 @@ bool SessionDBManager::createSessionDB(const QString &sessionId) {
 
 void SessionDBManager::insertCommandOutput(const QString &sessionId,
                                            const QString &command,
-                                           const QString &output)
+                                           const QString &output,
+                                           const QString &cmdId)
 {
+    QMutexLocker locker(&m_mutex);
+
     // Skip if both are empty
     if (command.isEmpty() && output.isEmpty()) {
         return;
@@ -329,13 +344,13 @@ void SessionDBManager::insertCommandOutput(const QString &sessionId,
         return;
     }
 
-    db.transaction();
-
     // Case 1: New command entry (command provided, no output yet)
     if (!command.isEmpty() && output.isEmpty()) {
+        db.transaction();
         QSqlQuery ins(db);
-        ins.prepare("INSERT INTO history_v2 (command, status, stdout_text) VALUES (?, 'pending', '')");
+        ins.prepare("INSERT INTO history_v2 (command, cmd_id, status, stdout_text) VALUES (?, ?, 'pending', '')");
         ins.addBindValue(command);
+        ins.addBindValue(cmdId.isEmpty() ? QVariant() : cmdId);
         if (!ins.exec()) {
             qWarning() << "[DB] begin history_v2 failed:" << ins.lastError().text();
             db.rollback();
@@ -349,6 +364,16 @@ void SessionDBManager::insertCommandOutput(const QString &sessionId,
     // Case 2: Append output to existing command entry
     if (!output.isEmpty() && command.isEmpty()) {
         qint64 id = m_lastRowId.value(sessionId, -1);
+
+        // If cmdId is provided, find the row by cmdId for more precise matching
+        if (!cmdId.isEmpty()) {
+            QSqlQuery sel(db);
+            sel.prepare("SELECT id FROM history_v2 WHERE cmd_id = ? ORDER BY id DESC LIMIT 1");
+            sel.addBindValue(cmdId);
+            if (sel.exec() && sel.next()) {
+                id = sel.value(0).toLongLong();
+            }
+        }
 
         // Try to find the last row if we don't have a cached ID
         if (id < 0) {
@@ -375,14 +400,13 @@ void SessionDBManager::insertCommandOutput(const QString &sessionId,
             upd.addBindValue(id);
             if (!upd.exec()) {
                 qWarning() << "[DB] append stdout failed:" << upd.lastError().text();
-                db.rollback();
                 return;
             }
-            db.commit();
             return;
         }
 
         // No existing row to append to - create a synthetic entry
+        db.transaction();
         QSqlQuery ins2(db);
         ins2.prepare("INSERT INTO history_v2 (command, status, stdout_text) VALUES ('<orphan output>', 'ok', ?)");
         ins2.addBindValue(normalizeText(output));
@@ -397,6 +421,7 @@ void SessionDBManager::insertCommandOutput(const QString &sessionId,
     }
 
     // Case 3: Both command and output provided (single insert)
+    db.transaction();
     QSqlQuery ins3(db);
     ins3.prepare("INSERT INTO history_v2 (command, status, stdout_text) VALUES (?, 'ok', ?)");
     ins3.addBindValue(command);
@@ -419,19 +444,6 @@ QString SessionDBManager::normalizeText(QString s) {
 }
 
 
-bool SessionDBManager::open(const QString& dbPath) {
-    m_mainDb = QSqlDatabase::addDatabase("QSQLITE", "animo_sessions");
-    m_mainDb.setDatabaseName(dbPath);
-    if (!m_mainDb.open()) { qWarning() << "[DB] open failed:" << m_mainDb.lastError().text(); return false; }
-    QSqlQuery p(m_mainDb); p.exec("PRAGMA journal_mode=WAL;"); p.exec("PRAGMA synchronous=NORMAL;"); p.exec("PRAGMA busy_timeout=5000;");
-    return true;
-}
-bool SessionDBManager::ensureSchemaV2() {
-    if (!m_mainDb.isOpen()) return false; QSqlQuery q(m_mainDb);
-    return q.exec("CREATE TABLE IF NOT EXISTS history_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, command TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ok', exit_code INTEGER, stdout_text TEXT NOT NULL DEFAULT '', stderr_text TEXT NOT NULL DEFAULT '', duration_ms INTEGER)");
-}
-bool SessionDBManager::migrateHistoryToV2() { return true; }
-
 // Token logging implementation
 bool SessionDBManager::logToken(const QString &sessionId,
                                  const QString &source,
@@ -444,6 +456,7 @@ bool SessionDBManager::logToken(const QString &sessionId,
                                  const QString &scope,
                                  int expiresIn)
 {
+    QMutexLocker locker(&m_mutex);
     if (!initMainDB()) {
         qWarning() << "[DB] logToken: failed to init main DB";
         return false;

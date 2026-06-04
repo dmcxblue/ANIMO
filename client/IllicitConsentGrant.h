@@ -16,6 +16,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QRegularExpression>
+#include <QSpinBox>
 
 class DashboardWindow;
 
@@ -23,6 +24,7 @@ class IllicitConsentGrant : public QWidget {
     Q_OBJECT
 public:
     explicit IllicitConsentGrant(DashboardWindow *dashboard = nullptr, QWidget *parent = nullptr);
+    ~IllicitConsentGrant();
 
 private slots:
     void handleStart();
@@ -46,6 +48,7 @@ private:
     QCheckBox *createSessionCheckbox;
     QTextEdit *urlBox;
     QTextEdit *tokenOutput;
+    QSpinBox *portSpinBox;
 
     // State
     QString clientId;

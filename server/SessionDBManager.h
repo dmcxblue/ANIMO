@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QMutex>
 
 class SessionDBManager {
 public:
@@ -38,11 +39,8 @@ public:
 
     void insertCommandOutput(const QString &sessionId,
                              const QString &command,
-                             const QString &output);
-							 
-	bool open(const QString& dbPath); // replace existing open/init if present
-    bool ensureSchemaV2();
-    bool migrateHistoryToV2(); // optional, safe to skip if you don't care about old rows
+                             const QString &output,
+                             const QString &cmdId = QString());
 
     // Token logging methods
     bool logToken(const QString &sessionId,
@@ -70,9 +68,9 @@ public:
 private:
     SessionDBManager();
     ~SessionDBManager();
-	bool execPragmas();
     static QString normalizeText(QString s); // CRLF→LF, strip NUL
 
     QSqlDatabase m_mainDb;
     QHash<QString, qint64> m_lastRowId;
+    mutable QMutex m_mutex;
 };

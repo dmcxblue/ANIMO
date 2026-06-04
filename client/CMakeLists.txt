@@ -25,7 +25,7 @@ target_include_directories(AnimoClient
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/shared
-	${CMAKE_CURRENT_SOURCE_DIR}/network
+        ${CMAKE_CURRENT_SOURCE_DIR}/network
 )
 
 # Resources to embed (use RELATIVE paths!)

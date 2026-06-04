@@ -2,6 +2,7 @@
 #define EMAILRULESWINDOW_H
 
 #include <QWidget>
+#include <atomic>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTableWidget>
@@ -97,7 +98,7 @@ private:
     // Cancel support
     QPushButton *cancelBtn;
     QList<QNetworkReply*> activeReplies;
-    bool cancelRequested = false;
+    std::atomic<bool> cancelRequested{false};
 };
 
 #endif // EMAILRULESWINDOW_H

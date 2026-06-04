@@ -2,6 +2,7 @@
 #define ENUMERATIONWINDOWBASE_H
 
 #include <QWidget>
+#include <atomic>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTextEdit>
@@ -54,7 +55,7 @@ protected:
 
     // Request tracking
     QList<QNetworkReply*> activeReplies;
-    bool cancelRequested;
+    std::atomic<bool> cancelRequested{false};
     bool operationInProgress;
 
     // Setup the base UI elements (call from subclass setupUi)
@@ -80,9 +81,12 @@ protected:
     void updateProgress(int current, int total);
     void resetProgress();
 
-    // Token validation
+    // Token validation (warns on audience mismatch but lets user proceed)
     bool validateToken(const QString &token, const QString &requiredAudience = QString());
     QString getToken() const;
+
+    // Target resource for auto-fetch (subclasses can override)
+    void setTargetResource(const QString &resource) { m_targetResource = resource; }
 
     // Request tracking
     void trackReply(QNetworkReply *reply);
@@ -107,6 +111,7 @@ private slots:
 private:
     QElapsedTimer elapsedTimer;
     QTimer *elapsedUpdateTimer;
+    QString m_targetResource = QStringLiteral("https://graph.microsoft.com");
     QString formatElapsedTime(qint64 ms) const;
 };
 

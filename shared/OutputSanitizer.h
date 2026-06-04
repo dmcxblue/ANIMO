@@ -53,8 +53,6 @@ public:
     // Marker constants for output extraction
     static constexpr const char* BEGIN_MARKER = "__QZ_BEGIN__";
     static constexpr const char* END_MARKER = "__QZ_END__";
-    static constexpr const char* ERROR_BEGIN_MARKER = "__QZ_ERROR_BEGIN__";
-    static constexpr const char* ERROR_END_MARKER = "__QZ_ERROR_END__";
 };
 
 #endif // OUTPUT_SANITIZER_H

@@ -1,9 +1,7 @@
 #include <QApplication>
 #include <QIcon>
-#include <QFile>
 #include <QMessageBox>
 #include <QScreen>
-#include <QStyle>
 
 #include "DashboardWindow.h"
 #include "ThemeManager.h"

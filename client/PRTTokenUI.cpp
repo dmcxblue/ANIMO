@@ -71,9 +71,63 @@ void PRTTokenUI::performExchange() {
         return;
     }
 
-    // Clean the PRT token - remove ALL whitespace, newlines, and control characters
-    QString cleanedPrtToken = prtToken->toPlainText();
-    cleanedPrtToken = cleanedPrtToken.replace(QRegularExpression("[\\r\\n\\t\\s]"), "");
+    // Get raw input and split by newlines to handle multiple tokens
+    QString rawInput = prtToken->toPlainText();
+    QStringList lines = rawInput.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+
+    // Look for the RS256 device assertion JWT (the one needed for x-ms-RefreshTokenCredential)
+    // It has "alg":"RS256" and "typ":"JWT" and "x5c" certificate chain
+    QString cleanedPrtToken;
+    for (const QString &line : lines) {
+        QString trimmed = line.trimmed();
+        if (!trimmed.startsWith("eyJ")) continue;
+
+        // Try to decode header to check if this is the RS256 assertion
+        QStringList parts = trimmed.split('.');
+        if (parts.size() >= 2) {
+            QByteArray headerB64 = parts[0].toUtf8();
+            // Pad to valid base64
+            int pad = (4 - (headerB64.size() % 4)) % 4;
+            headerB64.append(QByteArray(pad, '='));
+            QByteArray headerJson = QByteArray::fromBase64(headerB64, QByteArray::Base64UrlEncoding);
+
+            // Check for RS256 with x5c (device assertion) - this is what we need
+            if (headerJson.contains("RS256") && headerJson.contains("x5c")) {
+                cleanedPrtToken = trimmed;
+                qDebug() << "[PRTTokenUI] Found RS256 device assertion JWT";
+                break;
+            }
+            // If we haven't found RS256 yet, keep looking but save HS256 as fallback
+            if (cleanedPrtToken.isEmpty() && headerJson.contains("HS256")) {
+                // This is the HS256 token with refresh_token - not what we need for SSO
+                qDebug() << "[PRTTokenUI] Found HS256 token (not the device assertion)";
+            }
+        }
+    }
+
+    // If no RS256 found, try cleaning the entire input as single token
+    if (cleanedPrtToken.isEmpty()) {
+        cleanedPrtToken = rawInput;
+        cleanedPrtToken = cleanedPrtToken.replace(QRegularExpression("[\\r\\n\\t\\s]"), "");
+
+        // Check if concatenated tokens - look for eyJ appearing twice
+        int secondEyJ = cleanedPrtToken.indexOf("eyJ", 4);
+        if (secondEyJ > 0) {
+            // Likely concatenated - try to extract the RS256 one
+            QString secondToken = cleanedPrtToken.mid(secondEyJ);
+            QStringList parts = secondToken.split('.');
+            if (parts.size() >= 2) {
+                QByteArray headerB64 = parts[0].toUtf8();
+                int pad = (4 - (headerB64.size() % 4)) % 4;
+                headerB64.append(QByteArray(pad, '='));
+                QByteArray headerJson = QByteArray::fromBase64(headerB64, QByteArray::Base64UrlEncoding);
+                if (headerJson.contains("RS256") && headerJson.contains("x5c")) {
+                    cleanedPrtToken = secondToken;
+                    qDebug() << "[PRTTokenUI] Extracted RS256 device assertion from concatenated tokens";
+                }
+            }
+        }
+    }
 
     if (cleanedPrtToken.isEmpty()) {
         QMessageBox::warning(this, "Error", "PRT Token is empty. Please paste a valid PRT token.");
@@ -90,7 +144,7 @@ void PRTTokenUI::performExchange() {
         }
     }
 
-    qDebug() << "[PRTTokenUI] Original token length:" << prtToken->toPlainText().length();
+    qDebug() << "[PRTTokenUI] Original token length:" << rawInput.length();
     qDebug() << "[PRTTokenUI] Cleaned token length:" << cleanedPrtToken.length();
 
     auto *ex = new PRTTokenExchanger(

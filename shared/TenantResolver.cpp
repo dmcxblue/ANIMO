@@ -63,7 +63,11 @@ void TenantResolver::resolveTenant(const QString &domain) {
 
         if (reply->error() == QNetworkReply::NoError) {
             QByteArray data = reply->readAll();
-            QJsonDocument doc = QJsonDocument::fromJson(data);
+            QJsonParseError parseError;
+            QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+            if (parseError.error != QJsonParseError::NoError) {
+                qWarning() << "[TenantResolver] JSON parse error:" << parseError.errorString();
+            }
 
             if (doc.isObject()) {
                 QString authEndpoint = doc.object().value("authorization_endpoint").toString();

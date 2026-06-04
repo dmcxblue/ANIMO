@@ -38,6 +38,9 @@ class DeviceCode2WFH(QWidget, Authentication, DeviceAuthentication):
         self.refresh_token = None
         self.access_token = None
         self.custom_device_name = None
+        self.proxies = None
+        self.verify = True
+        self.target_domain = "quetzalcoatl.cloud"  # Configurable target domain for device registration
 
         self.init_ui()
 
@@ -155,7 +158,7 @@ class DeviceCode2WFH(QWidget, Authentication, DeviceAuthentication):
                 "Data": certbytes.decode("utf-8")
             },
             "TransportKey": pubkeycngblob.decode("utf-8"),
-            "TargetDomain": "quetzalcoatl.cloud",
+            "TargetDomain": self.target_domain,
             "DeviceType": "Windows",
             "OSVersion": "10.0.19041.928",
             "DeviceDisplayName": device_name,

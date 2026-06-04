@@ -71,6 +71,7 @@ private:
     QMap<QString, TokenExpiry> tokenExpiryMap;
     QTimer *expiryUpdateTimer = nullptr;
     bool autoRenewEnabled = true;  // Global setting
+    bool tokenHelperConnected = false;  // Track TokenHelper signal connection
 
     void initUI();
     void updateExpiryDisplay();
@@ -82,8 +83,10 @@ public slots:
     void onServerJson(const QJsonObject &obj);
 
     void launchAccessTokenWindow();
+    void launchSPNLoginWindow();
     void launchDeviceCodeWindow();
     void launchIllicitConsentWindow();
+    void launchWebhookCaptureWindow();
     void createNewSession();
     void addSessionRow(const QString &sessionId, const QString &username, const QString &tenantId, const QString &domain, const QString &resource, const QDateTime &expiry = QDateTime());
 
@@ -96,14 +99,6 @@ public slots:
     void onAzureLoginSuccess(const QString &token, const QString &resource, const QString &sessionId);
 
     void loadExistingSessions();
-    //void getUsers();
-    //void getGroups();
-    //void getUserRoles();
-    //void getContext();
-    //void getAzContext();
-    //void getCurrentUser();
-    //void getTenantInfo();
-    //void getTokenInfo();
 
     void openUserSessionTab(int row, int column);
     void closeSessionTab(int index);
@@ -121,6 +116,9 @@ public slots:
     void openAttackWfh();
     void openAttackAppSecret();
     void openSPNSpray();
+    void openRefreshTokenSpray();
+    void openMagicAppFinder();
+    void openGatherAllWindow();
     void openTokenLogWindow();
     void openTokenAnalysisWindow();
     void openSessionTimelineWindow();
@@ -151,11 +149,14 @@ public slots:
     void autoRestoreSessions();
     void autoSaveSession(const QString &sessionId);
 
+    // Session migration (token exchange to different resource)
+    void migrateSession(const QString &sourceSessionId, const QString &username,
+                        const QString &tenantId, const QString &targetResource);
+
     // Session export/import
     void openExportSessionsWindow();
     void openImportSessionsWindow();
 
-    //void logConnectionEvent(const QString &username, const QString &sessionId);
 };
 
 #endif // DASHBOARDWINDOW_H

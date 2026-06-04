@@ -11,6 +11,7 @@
 #include <QRegularExpression>
 #include <QTextStream>
 #include <QGroupBox>
+#include <QPointer>
 #include <memory>
 
 
@@ -325,12 +326,14 @@ void OutlookEmailWindow::composeNewEmail() {
     connect(rep, &QNetworkReply::finished, this, [this, rep, files]() {
         if (rep->error() != QNetworkReply::NoError) {
             QMessageBox::critical(this, "New Email Failed", NetworkHelper::parseApiError(rep));
+            activeReplies.removeAll(rep);
             rep->deleteLater();
             return;
         }
 
         const QString draftId =
             QJsonDocument::fromJson(rep->readAll()).object().value("id").toString();
+        activeReplies.removeAll(rep);
         rep->deleteLater();
 
         if (draftId.isEmpty()) {
@@ -397,6 +400,7 @@ void OutlookEmailWindow::reloadMailbox() {
     }
 
     QNetworkReply *rep = net->get(req);
+    activeReplies.append(rep);
     connect(rep, &QNetworkReply::finished, this, [this, rep]() {
         setLoading(false);
         lstEmails->clear();
@@ -408,6 +412,7 @@ void OutlookEmailWindow::reloadMailbox() {
 
         if (rep->error() != QNetworkReply::NoError) {
             lstEmails->addItem(QString("[!] HTTP error: %1").arg(NetworkHelper::parseApiError(rep)));
+            activeReplies.removeAll(rep);
             rep->deleteLater();
             return;
         }
@@ -417,6 +422,7 @@ void OutlookEmailWindow::reloadMailbox() {
 
         if (emails.isEmpty()) {
             lstEmails->addItem("[!] No emails found");
+            activeReplies.removeAll(rep);
             rep->deleteLater();
             return;
         }
@@ -485,6 +491,7 @@ void OutlookEmailWindow::reloadMailbox() {
             lstEmails->setCurrentRow(0);  // triggers selection handler below
         }
 
+        activeReplies.removeAll(rep);
         rep->deleteLater();
     });
 }
@@ -533,6 +540,7 @@ void OutlookEmailWindow::loadFullMessage(const QString &msgId) {
     NetworkHelper::setRequestTimeout(req);
 
     QNetworkReply *rep = net->get(req);
+    activeReplies.append(rep);
     connect(rep, &QNetworkReply::finished, this, [this, rep, msgId]() {
         if (!rep) {
             txtBody->setHtml("<pre>[!] Network request failed</pre>");
@@ -540,6 +548,7 @@ void OutlookEmailWindow::loadFullMessage(const QString &msgId) {
         }
         if (rep->error() != QNetworkReply::NoError) {
             txtBody->setHtml(QString("<pre>[!] Failed to load message: %1</pre>").arg(NetworkHelper::parseApiError(rep)));
+            activeReplies.removeAll(rep);
             rep->deleteLater();
             return;
         }
@@ -565,6 +574,7 @@ void OutlookEmailWindow::loadFullMessage(const QString &msgId) {
         auto attReq = NetworkHelper::outlookJsonRequest(attUrl, accessToken);
         NetworkHelper::setRequestTimeout(attReq);
         QNetworkReply *attRep = net->get(attReq);
+        activeReplies.append(attRep);
         connect(attRep, &QNetworkReply::finished, this, [this, attRep, isHtml, html]() mutable {
             if (!attRep) {
                 txtBody->setHtml(isHtml ? html : ("<pre>" + html.toHtmlEscaped() + "</pre>"));
@@ -572,6 +582,7 @@ void OutlookEmailWindow::loadFullMessage(const QString &msgId) {
             }
             if (attRep->error() != QNetworkReply::NoError) {
                 txtBody->setHtml(isHtml ? html : ("<pre>" + html.toHtmlEscaped() + "</pre>"));
+                activeReplies.removeAll(attRep);
                 attRep->deleteLater();
                 return;
             }
@@ -592,9 +603,11 @@ void OutlookEmailWindow::loadFullMessage(const QString &msgId) {
 			
 
             setPreviewHtml(html, arr);
+            activeReplies.removeAll(attRep);
             attRep->deleteLater();
         });
 
+        activeReplies.removeAll(rep);
         rep->deleteLater();
     });
 }
@@ -657,6 +670,7 @@ void OutlookEmailWindow::replyToEmail() {
     auto req = NetworkHelper::outlookJsonRequest(createUrl, accessToken);
     NetworkHelper::setRequestTimeout(req);
     QNetworkReply *rep = net->post(req, QByteArray()); // empty body per Graph docs
+    activeReplies.append(rep);
     connect(rep, &QNetworkReply::finished, this, [this, rep]() {
         if (!rep) {
             QMessageBox::warning(this, "Reply Error", "Network request failed");
@@ -664,11 +678,13 @@ void OutlookEmailWindow::replyToEmail() {
         }
         if (rep->error() != QNetworkReply::NoError) {
             QMessageBox::warning(this, "Reply Error", NetworkHelper::parseApiError(rep));
+            activeReplies.removeAll(rep);
             rep->deleteLater();
             return;
         }
         const auto replyMsg = QJsonDocument::fromJson(rep->readAll()).object();
         const QString replyId = replyMsg.value("id").toString();
+        activeReplies.removeAll(rep);
         rep->deleteLater();
         if (replyId.isEmpty()) {
             QMessageBox::warning(this, "Reply Error", "Failed to create reply message.");
@@ -694,6 +710,7 @@ void OutlookEmailWindow::replyToEmail() {
         };
         QNetworkReply *upd = net->sendCustomRequest(updReq, "PATCH",
                                                     QJsonDocument(bodyObj).toJson());
+        activeReplies.append(upd);
         connect(upd, &QNetworkReply::finished, this, [this, upd, replyId, attachments]() {
             if (!upd) {
                 QMessageBox::critical(this, "Reply Failed", "Network request failed");
@@ -701,9 +718,11 @@ void OutlookEmailWindow::replyToEmail() {
             }
             if (upd->error() != QNetworkReply::NoError) {
                 QMessageBox::critical(this, "Reply Failed", NetworkHelper::parseApiError(upd));
+                activeReplies.removeAll(upd);
                 upd->deleteLater();
                 return;
             }
+            activeReplies.removeAll(upd);
             upd->deleteLater();
 
             // Upload attachments async, then send
@@ -735,7 +754,9 @@ void OutlookEmailWindow::toggleReadStatus() {
     QJsonObject body{ {"isRead", !isRead} };
 
     QNetworkReply *r = net->sendCustomRequest(req, "PATCH", QJsonDocument(body).toJson());
+    activeReplies.append(r);
     connect(r, &QNetworkReply::finished, this, [this, r]() {
+        activeReplies.removeAll(r);
         if (r) r->deleteLater();
         reloadMailbox();
     });
@@ -753,7 +774,9 @@ void OutlookEmailWindow::deleteEmail() {
     QJsonObject body{ {"destinationId", "deleteditems"} };
 
     QNetworkReply *r = net->post(req, QJsonDocument(body).toJson());
+    activeReplies.append(r);
     connect(r, &QNetworkReply::finished, this, [this, r]() {
+        activeReplies.removeAll(r);
         if (r) r->deleteLater();
         reloadMailbox();
     });
@@ -769,7 +792,9 @@ void OutlookEmailWindow::permanentlyDeleteEmail() {
     auto req = NetworkHelper::outlookJsonRequest(url, accessToken);
     NetworkHelper::setRequestTimeout(req);
     QNetworkReply *r = net->deleteResource(req);
+    activeReplies.append(r);
     connect(r, &QNetworkReply::finished, this, [this, r]() {
+        activeReplies.removeAll(r);
         if (r) r->deleteLater();
         reloadMailbox();
     });
@@ -809,13 +834,18 @@ void OutlookEmailWindow::markAllAsRead() {
         QByteArray body = QJsonDocument(patch).toJson(QJsonDocument::Compact);
 
         QNetworkReply *r = net->sendCustomRequest(req, "PATCH", body);
-        connect(r, &QNetworkReply::finished, this, [r]() { if (r) r->deleteLater(); });
+        activeReplies.append(r);
+        connect(r, &QNetworkReply::finished, this, [this, r]() { activeReplies.removeAll(r); if (r) r->deleteLater(); });
     }
 
     QMessageBox::information(this, "Bulk Operation",
         QString("Marking %1 emails as read...").arg(emails.size()));
 
-    QTimer::singleShot(2000, this, &OutlookEmailWindow::reloadMailbox);
+    // Use QPointer guard to prevent callback on deleted object
+    QPointer<OutlookEmailWindow> self = this;
+    QTimer::singleShot(2000, [self]() {
+        if (self) self->reloadMailbox();
+    });
 }
 
 void OutlookEmailWindow::deleteAllEmails() {
@@ -850,13 +880,18 @@ void OutlookEmailWindow::deleteAllEmails() {
         QByteArray body = QJsonDocument(movePayload).toJson(QJsonDocument::Compact);
 
         QNetworkReply *r = net->post(req, body);
-        connect(r, &QNetworkReply::finished, this, [r]() { if (r) r->deleteLater(); });
+        activeReplies.append(r);
+        connect(r, &QNetworkReply::finished, this, [this, r]() { activeReplies.removeAll(r); if (r) r->deleteLater(); });
     }
 
     QMessageBox::information(this, "Bulk Operation",
         QString("Deleting %1 emails...").arg(emails.size()));
 
-    QTimer::singleShot(2000, this, &OutlookEmailWindow::reloadMailbox);
+    // Use QPointer guard to prevent callback on deleted object
+    QPointer<OutlookEmailWindow> self = this;
+    QTimer::singleShot(2000, [self]() {
+        if (self) self->reloadMailbox();
+    });
 }
 
 void OutlookEmailWindow::exportEmailsToEML() {
@@ -1093,11 +1128,13 @@ void OutlookEmailWindow::uploadAttachmentsAsync(const QString &draftId, const QS
         };
 
         QNetworkReply *rep = net->post(req, QJsonDocument(att).toJson());
+        activeReplies.append(rep);
         connect(rep, &QNetworkReply::finished, this, [rep, pending, allSuccess, onComplete, path, this]() {
             if (!rep || rep->error() != QNetworkReply::NoError) {
                 *allSuccess = false;
                 appendLog(QString("[-] Failed to upload: %1").arg(QFileInfo(path).fileName()), "red");
             }
+            activeReplies.removeAll(rep);
             if (rep) rep->deleteLater();
 
             (*pending)--;
@@ -1116,8 +1153,10 @@ void OutlookEmailWindow::sendDraftAsync(const QString &draftId, std::function<vo
     NetworkHelper::setRequestTimeout(req);
 
     QNetworkReply *rep = net->post(req, QByteArray());
-    connect(rep, &QNetworkReply::finished, this, [rep, onComplete]() {
+    activeReplies.append(rep);
+    connect(rep, &QNetworkReply::finished, this, [this, rep, onComplete]() {
         bool ok = (rep && rep->error() == QNetworkReply::NoError);
+        activeReplies.removeAll(rep);
         if (rep) rep->deleteLater();
         onComplete(ok);
     });
@@ -1157,11 +1196,13 @@ void OutlookEmailWindow::downloadAttachmentAsync(int index)
         NetworkHelper::setRequestTimeout(req);
 
         QNetworkReply *rep = net->get(req);
-        connect(rep, &QNetworkReply::finished, this, [rep, processDownload]() {
+        activeReplies.append(rep);
+        connect(rep, &QNetworkReply::finished, this, [this, rep, processDownload]() {
             QString b64;
             if (rep && rep->error() == QNetworkReply::NoError) {
                 b64 = QJsonDocument::fromJson(rep->readAll()).object().value("contentBytes").toString();
             }
+            activeReplies.removeAll(rep);
             if (rep) rep->deleteLater();
             processDownload(b64);
         });

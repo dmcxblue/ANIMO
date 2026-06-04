@@ -194,8 +194,10 @@ void FunctionAppExplorerWindow::enumerateFunctionApps() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, token]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
 
         QString errorMsg;
@@ -240,8 +242,10 @@ void FunctionAppExplorerWindow::enumerateFunctionApps() {
                 }
                 return;
             }
+            activeReplies.append(appReply);
 
             connect(appReply, &QNetworkReply::finished, this, [this, appReply, subId, counter]() {
+                activeReplies.removeAll(appReply);
                 appReply->deleteLater();
                 (*counter)--;
 
@@ -333,8 +337,10 @@ void FunctionAppExplorerWindow::listFunctions() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
@@ -413,8 +419,10 @@ void FunctionAppExplorerWindow::getAppSettings() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
@@ -472,8 +480,10 @@ void FunctionAppExplorerWindow::getConnectionStrings() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 

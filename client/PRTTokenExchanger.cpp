@@ -78,11 +78,14 @@ void PRTTokenExchanger::getAccessToken() {
     qDebug() << "[PRTTokenExchanger] Resource:" << resource;
     qDebug() << "[PRTTokenExchanger] Redirect URI:" << redirectUri;
     qDebug() << "[PRTTokenExchanger] PRT Token length:" << prtToken.length();
-    qDebug() << "[PRTTokenExchanger] PRT Token preview:" << prtToken.left(50) + "...";
 
     QNetworkRequest req{ QUrl(url) };
-    req.setRawHeader("User-Agent", QByteArray("Mozilla/5.0"));
+    // Use Windows native client User-Agent for SSO compatibility
+    req.setRawHeader("User-Agent", QByteArray(
+        "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; "
+        ".NET4.0C; .NET4.0E; Tablet PC 2.0)"));
     req.setRawHeader("x-ms-RefreshTokenCredential", prtToken.toUtf8());
+    req.setRawHeader("Accept", QByteArray("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
 
     // Disable automatic redirect following so we can capture the Location header
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
@@ -116,11 +119,8 @@ void PRTTokenExchanger::handleAuthReply() {
         qDebug() << "  " << headerPair.first << ":" << headerPair.second;
     }
 
-    // Debug: log response body
+    // Debug: log response body length only (avoid logging sensitive token data)
     qDebug() << "[PRTTokenExchanger] Response body length:" << responseBody.length();
-    if (!responseBody.isEmpty()) {
-        qDebug() << "[PRTTokenExchanger] Response body:" << responseBody.left(1000);
-    }
 
     QString location = rep->header(QNetworkRequest::LocationHeader).toString();
 
@@ -139,17 +139,30 @@ void PRTTokenExchanger::handleAuthReply() {
 
     // Check for Location header (redirect)
     if (location.isEmpty()) {
-        // Try to parse error from response body
         QString bodyText = QString::fromUtf8(responseBody);
-        QString errorMsg = QString("No Location header in response.\n\nHTTP Status: %1\n\n"
-                                   "This usually means:\n"
-                                   "1. PRT token is invalid/malformed\n"
-                                   "2. PRT token has newlines or whitespace\n"
-                                   "3. Client ID doesn't support PRT auth\n"
-                                   "4. Microsoft rejected the PRT\n\n"
-                                   "Response body:\n%2")
+
+        // Try to extract error details from HTML response
+        QString errorDetail;
+        if (bodyText.contains("AADSTS", Qt::CaseInsensitive)) {
+            QRegularExpression aadRe("(AADSTS\\d+[^<\"'\\n]{0,200})");
+            QRegularExpressionMatch m = aadRe.match(bodyText);
+            if (m.hasMatch()) {
+                errorDetail = QString("\n\nAAD Error: %1").arg(m.captured(1));
+            }
+        }
+
+        QString errorMsg = QString("PRT SSO failed - Microsoft returned login page instead of redirect.\n\n"
+                                   "HTTP Status: %1%2\n\n"
+                                   "Possible causes:\n"
+                                   "• PRT token is expired or invalid\n"
+                                   "• PRT must be the full signed assertion from BrowserCore\n"
+                                   "• Tenant mismatch (PRT is for different tenant)\n"
+                                   "• Device is not AAD-joined or Hybrid-joined\n"
+                                   "• Conditional Access policy blocking SSO\n\n"
+                                   "Tip: Ensure you're using the x-ms-RefreshTokenCredential value\n"
+                                   "from BrowserCore, not a raw refresh token.")
             .arg(httpStatus)
-            .arg(bodyText.left(800));
+            .arg(errorDetail);
         emit errorOccurred(errorMsg);
         return;
     }

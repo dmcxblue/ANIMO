@@ -237,12 +237,19 @@ void KeyVaultExplorerWindow::enumerateKeyVaults() {
     // First get subscriptions
     QString url = "https://management.azure.com/subscriptions?api-version=2020-01-01";
     QNetworkReply *reply = net->get(bearerRequest(url, token));
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, token]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
-            appendLog(QString("[-] Error: %1").arg(reply->errorString()), "red");
+            appendLog(QString("[-] %1").arg(NetworkHelper::parseApiError(reply)), "red");
             setLoading(false);
             return;
         }
@@ -274,7 +281,15 @@ void KeyVaultExplorerWindow::enumerateKeyVaults() {
             QString vaultUrl = QString("https://management.azure.com/subscriptions/%1/providers/Microsoft.KeyVault/vaults?api-version=2022-07-01").arg(subId);
 
             QNetworkReply *vaultReply = net->get(bearerRequest(vaultUrl, token));
+            if (!vaultReply) {
+                (*counter)--;
+                appendLog("[-] Network request failed for subscription " + subId, "red");
+                if (*counter == 0) setLoading(false);
+                continue;
+            }
+            activeReplies.append(vaultReply);
             connect(vaultReply, &QNetworkReply::finished, this, [this, vaultReply, subId, counter]() {
+                activeReplies.removeAll(vaultReply);
                 vaultReply->deleteLater();
                 (*counter)--;
 
@@ -301,6 +316,9 @@ void KeyVaultExplorerWindow::enumerateKeyVaults() {
                         item->setText(4, "-");
                         item->setText(5, vaultUri);
                     }
+                } else {
+                    appendLog(QString("[-] Failed to enumerate vaults for subscription %1: %2")
+                              .arg(subId, NetworkHelper::parseApiError(vaultReply)), "red");
                 }
 
                 if (*counter == 0) {
@@ -349,17 +367,20 @@ void KeyVaultExplorerWindow::listSecrets() {
 
     QString url = currentVaultUrl + "secrets?api-version=7.4";
     QNetworkReply *reply = net->get(bearerRequest(url, token));
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
         if (reply->error() != QNetworkReply::NoError) {
-            appendLog(QString("[-] Error: %1").arg(reply->errorString()), "red");
-            QByteArray body = reply->readAll();
-            if (!body.isEmpty()) {
-                appendLog(QString("[-] Response: %1").arg(QString::fromUtf8(body)), "red");
-            }
+            appendLog(QString("[-] %1").arg(NetworkHelper::parseApiError(reply)), "red");
             return;
         }
 
@@ -416,13 +437,20 @@ void KeyVaultExplorerWindow::listKeys() {
 
     QString url = currentVaultUrl + "keys?api-version=7.4";
     QNetworkReply *reply = net->get(bearerRequest(url, token));
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
         if (reply->error() != QNetworkReply::NoError) {
-            appendLog(QString("[-] Error: %1").arg(reply->errorString()), "red");
+            appendLog(QString("[-] %1").arg(NetworkHelper::parseApiError(reply)), "red");
             return;
         }
 
@@ -474,13 +502,20 @@ void KeyVaultExplorerWindow::listCertificates() {
 
     QString url = currentVaultUrl + "certificates?api-version=7.4";
     QNetworkReply *reply = net->get(bearerRequest(url, token));
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
         if (reply->error() != QNetworkReply::NoError) {
-            appendLog(QString("[-] Error: %1").arg(reply->errorString()), "red");
+            appendLog(QString("[-] %1").arg(NetworkHelper::parseApiError(reply)), "red");
             return;
         }
 
@@ -537,13 +572,20 @@ void KeyVaultExplorerWindow::getSecretValue() {
 
     QString url = secretId + "?api-version=7.4";
     QNetworkReply *reply = net->get(bearerRequest(url, token));
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, item]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
         if (reply->error() != QNetworkReply::NoError) {
-            appendLog(QString("[-] Error: %1").arg(reply->errorString()), "red");
+            appendLog(QString("[-] %1").arg(NetworkHelper::parseApiError(reply)), "red");
             return;
         }
 
@@ -586,8 +628,15 @@ void KeyVaultExplorerWindow::exportCertificate() {
     QString secretUrl = currentVaultUrl + "secrets/" + certName + "?api-version=7.4";
     QNetworkRequest req = NetworkHelper::createBearerRequest(secretUrl, token);
     QNetworkReply *reply = net->get(req);
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, certName]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
@@ -686,8 +735,15 @@ void KeyVaultExplorerWindow::listAccessPolicies() {
     QString url = QString("https://management.azure.com%1?api-version=2022-07-01").arg(vaultResourceId);
     QNetworkRequest req = NetworkHelper::createBearerRequest(url, mgmtToken);
     QNetworkReply *reply = net->get(req);
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, vaultName]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 

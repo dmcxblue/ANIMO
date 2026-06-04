@@ -48,6 +48,7 @@ static QHash<QString, QSet<QTcpSocket*>> g_subscribers;   // sessionId -> socket
 static QHash<QString, QByteArray>        g_stdoutBuf;     // sessionId -> aggregated stdout (for marker scan)
 static QHash<QString, QJsonObject>       g_sessionInfo;   // sessionId -> {user, tenantId, domain, resource}
 static QHash<QString, QString>           g_loginRid;      // sessionId -> rid (to echo back on login)
+static QHash<QString, QString>           g_pendingToken;  // sessionId -> access token (captured from PS before login OK)
 static QHash<QString, QString>           g_lastCommand;   // sessionId -> last command (for history)
 
 // Command execution state (simple queue with timeout)
@@ -251,6 +252,7 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                              {"sessionId", sessionId},
                              {"stream", "stdout"},
                              {"data", QString::fromUtf8(chunk)} });
+            emittedAny = true;  // Prevent duplicate broadcast later
         }
 
         // Extract zero or more complete __QZ_BEGIN__/__QZ_END__ segments (with optional :cmdId)
@@ -383,7 +385,7 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
             }
 
             // History
-            SessionDBManager::instance().insertCommandOutput(sessionId, QString(), cleaned);
+            SessionDBManager::instance().insertCommandOutput(sessionId, QString(), cleaned, cmdId);
         }
 
         // When any output segment completes (END marker found), clear active state
@@ -425,7 +427,23 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
             bufStr.remove(escapeRe);
             buf = bufStr.toUtf8();
 
-            // Only log when actual login markers are found (not every buffer scan)
+            // Capture access token emitted by SPN (or other) scripts before OK marker
+            static const QByteArray TOKEN_MARKER = "__ANIMO_TOKEN__:";
+            {
+                int tIdx = buf.indexOf(TOKEN_MARKER);
+                if (tIdx >= 0 && (tIdx == 0 || buf.at(tIdx - 1) == '\n')) {
+                    const int tStart = tIdx + TOKEN_MARKER.size();
+                    const int tNl = buf.indexOf('\n', tStart);
+                    const QByteArray tokenBA = (tNl >= 0) ? buf.mid(tStart, tNl - tStart) : buf.mid(tStart);
+                    QString token = QString::fromUtf8(tokenBA).trimmed();
+                    if (!token.isEmpty()) {
+                        g_pendingToken.insert(sessionId, token);
+                    }
+                    // consume the marker line
+                    if (tNl >= 0) buf.remove(tIdx, tNl - tIdx + 1);
+                    else buf.remove(tIdx, tokenBA.size() + TOKEN_MARKER.size());
+                }
+            }
 
             // Check for MFA required marker first
             const int mfaIdx = buf.indexOf(MFA_MARKER);
@@ -507,8 +525,9 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                     {"resource",  meta.value("resource").toString("https://management.azure.com")}
                 };
                 if (g_loginRid.contains(sessionId)) ev.insert("rid", g_loginRid.take(sessionId));
+                if (g_pendingToken.contains(sessionId)) ev.insert("accessToken", g_pendingToken.take(sessionId));
 
-                const auto &subs = g_subscribers.value(sessionId);
+                const auto subs = g_subscribers.value(sessionId);
                 qInfo() << "[Server] ✓ Session created:" << sessionId << "| User:" << upn << "| Method: Credentials";
                 broadcastTo(subs, ev);
 
@@ -566,6 +585,12 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
     QObject::connect(proc, QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),
                      parent, [sessionId](int exitCode, QProcess::ExitStatus exitStatus){
         QMutexLocker locker(&g_stateMutex);
+
+        // Guard: if session was already manually removed, skip cleanup
+        if (!g_sessions.contains(sessionId) && !g_subscribers.contains(sessionId)) {
+            return;
+        }
+
         QJsonObject msg{ {Protocol::F_ACTION, "session_exited"},
                          {"sessionId", sessionId},
                          {"exitCode", exitCode},
@@ -824,6 +849,65 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
+        // ——— SPN (Service Principal) FLOW ———
+        if (mode == QStringLiteral("spn")) {
+            const QString appId        = obj.value("appId").toString().trimmed();
+            const QString clientSecret = obj.value("clientSecret").toString();
+            const QString tenantId     = obj.value("tenantId").toString().trimmed();
+
+            if (appId.isEmpty() || clientSecret.isEmpty() || tenantId.isEmpty()) {
+                sendTo(sock, Protocol::err("appId, clientSecret, and tenantId required"));
+                return true;
+            }
+
+            QByteArray script = loadScript(":/scripts/login_spn_azure.ps1");
+            if (script.isEmpty()) {
+                sendTo(sock, Protocol::err("failed to load SPN login script"));
+                return true;
+            }
+
+            QString appDir = QCoreApplication::applicationDirPath();
+            QDir().mkpath(QString("%1/data/sessions/%2").arg(appDir, sid));
+            const QString ps1Path = QString("%1/data/sessions/%2/login.ps1").arg(appDir, sid);
+
+            QFile f(ps1Path);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                sendTo(sock, Protocol::err("failed to create login script"));
+                return true;
+            }
+            f.write(script);
+            f.close();
+
+            // Write credentials to a separate file to avoid exposing secret in process list
+            const QString credPath = QString("%1/data/sessions/%2/spn_cred.json").arg(appDir, sid);
+            QFile credFile(credPath);
+            if (!credFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                sendTo(sock, Protocol::err("failed to create credentials file"));
+                return true;
+            }
+            QJsonObject credObj;
+            credObj.insert("appId", appId);
+            credObj.insert("clientSecret", clientSecret);
+            credObj.insert("tenantId", tenantId);
+            credFile.write(QJsonDocument(credObj).toJson(QJsonDocument::Compact));
+            credFile.close();
+
+            if (!rid.isEmpty()) {
+                QMutexLocker locker(&g_stateMutex);
+                g_loginRid.insert(sid, rid);
+            }
+
+            // Pass only the credential file path, not the secret itself
+            QString execCmd = QString(". \"%1\" -CredentialFile \"%2\"\n")
+                .arg(ps1Path, credPath);
+            proc->write(execCmd.toUtf8());
+
+            QJsonObject ack = Protocol::ok("new_session ok");
+            ack.insert("sessionId", sid);
+            sendTo(sock, ack);
+            return true;
+        }
+
         // ——— TOKENS FLOW ———
         if (mode == QStringLiteral("tokens")) {
             const QString access = obj.value("accessToken").toString();
@@ -881,7 +965,8 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
 
             // Prepare a PS fragment that will emit markers understood by stdout hook
             auto emitOk = [&](const QString &upn)->QByteArray {
-                return QString("Write-Output \"__ANIMO_LOGIN_OK__:%1\"\n").arg(upn.isEmpty() ? "Unknown" : upn).toUtf8();
+                return QString("Write-Output ('__ANIMO_LOGIN_OK__:%1')\n")
+                    .arg(escapePsString(upn.isEmpty() ? QStringLiteral("Unknown") : upn)).toUtf8();
             };
             // emitFail now includes error message: __ANIMO_LOGIN_FAIL__:error_message
             auto emitFailWithMsg = [](const QString &errVar)->QByteArray {
@@ -941,8 +1026,8 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 ps.append("$a=@\"\n"); ps.append(access.toUtf8()); ps.append("\n\"@\n");
                 ps.append("$g=@\"\n"); ps.append(mgToken.toUtf8()); ps.append("\n\"@\n");
                 ps.append("try{Connect-AzAccount -AccessToken $a -MicrosoftGraphAccessToken $g ");
-                if (!user.isEmpty())     ps.append(QString("-AccountId '%1' ").arg(user).toUtf8());
-                if (!tenantId.isEmpty()) ps.append(QString("-TenantId '%1' ").arg(tenantId).toUtf8());
+                if (!user.isEmpty())     ps.append(QString("-AccountId '%1' ").arg(escapePsString(user)).toUtf8());
+                if (!tenantId.isEmpty()) ps.append(QString("-TenantId '%1' ").arg(escapePsString(tenantId)).toUtf8());
                 ps.append("-WA Ignore|Out-Null\n");
                 ps.append("$ctx=Get-AzContext -EA SilentlyContinue\n");
                 ps.append("if($ctx-and$ctx.Account){Write-Output \"__ANIMO_LOGIN_OK__:$($ctx.Account)\"}");
@@ -1029,7 +1114,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
 
         // Persist the command
         SessionDBManager::instance().createSessionDB(sid);
-        SessionDBManager::instance().insertCommandOutput(sid, cmd, QString());
+        SessionDBManager::instance().insertCommandOutput(sid, cmd, QString(), cmdId);
 
         // Execute with markers
         const QString wrapped = OutputSanitizer::wrapPwshCommandWithId(cmd, cmdId);
@@ -1165,12 +1250,24 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
+        // Validate session ID format to prevent path traversal in removeRecursively()
+        static const QRegularExpression sessionIdRe(
+            QStringLiteral("^[a-zA-Z0-9_\\-]{1,64}$"));
+        if (!sessionIdRe.match(sid).hasMatch()) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
+        }
+
         // Kill PS proc and clean global state
         QProcess *procToKill = nullptr;
         {
             QMutexLocker locker(&g_stateMutex);
             if (g_sessions.contains(sid)) {
                 procToKill = g_sessions.take(sid);
+                // Disconnect finished signal to prevent race with this cleanup
+                if (procToKill) {
+                    procToKill->disconnect();
+                }
             }
             g_subscribers.remove(sid);
             g_sessionInfo.remove(sid);
@@ -1178,6 +1275,9 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             g_loginRid.remove(sid);
             g_authState.remove(sid);
             g_lastCommand.remove(sid);
+            g_activeCmdId.remove(sid);
+            g_cmdStartTime.remove(sid);
+            g_pendingToken.remove(sid);
         }
         if (procToKill) {
             procToKill->kill();
@@ -1349,6 +1449,14 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
 
         if (sessionId.isEmpty()) {
             sendTo(sock, Protocol::err("sessionId is required for import"));
+            return true;
+        }
+
+        // Validate session ID format (same check as new_session)
+        static const QRegularExpression sessionIdRe(
+            QStringLiteral("^[a-zA-Z0-9_\\-]{1,64}$"));
+        if (!sessionIdRe.match(sessionId).hasMatch()) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
             return true;
         }
 

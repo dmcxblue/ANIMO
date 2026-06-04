@@ -80,7 +80,7 @@ Import-Module -Name SqlServer
 
 # AzTable I needed it for PWNDLabs
 
-Install-Module AzTable -Force
+Install-Module AzTable -Scope CurrentUser -Force
 
 # Microsoft Graph
 

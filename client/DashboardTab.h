@@ -11,6 +11,7 @@
 #include <QByteArray>    // ⬅️ needed for slot param
 #include <QJsonObject>   // ⬅️ needed for slot/helper
 #include <QList>
+#include <QPushButton>
 #include "CommandLineEdit.h"
 
 // Buffered command record to prevent output mixing
@@ -44,6 +45,9 @@ public:
                        const QString &tenantId,
                        const QString &resource);
 
+public slots:
+    void clearConsole();
+
 private slots:
     void runCustomQuery();
 
@@ -71,6 +75,7 @@ private:
 
     QTextEdit *output = nullptr;
     CommandLineEdit *queryInput = nullptr;
+    QPushButton *clearBtn = nullptr;
 
     void loadCommandHistory();
     void saveCommandHistory();

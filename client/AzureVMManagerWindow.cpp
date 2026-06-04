@@ -199,8 +199,10 @@ void AzureVMManagerWindow::enumerateVMs() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, token]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
 
         QString errorMsg;
@@ -246,8 +248,10 @@ void AzureVMManagerWindow::enumerateVMs() {
                 }
                 continue;
             }
+            activeReplies.append(vmReply);
 
             connect(vmReply, &QNetworkReply::finished, this, [this, vmReply, subId, subName, counter]() {
+                activeReplies.removeAll(vmReply);
                 vmReply->deleteLater();
                 (*counter)--;
 
@@ -364,8 +368,10 @@ void AzureVMManagerWindow::getVMDetails() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 
@@ -457,8 +463,10 @@ void AzureVMManagerWindow::runCommand() {
         setLoading(false);
         return;
     }
+    activeReplies.append(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        activeReplies.removeAll(reply);
         reply->deleteLater();
         setLoading(false);
 

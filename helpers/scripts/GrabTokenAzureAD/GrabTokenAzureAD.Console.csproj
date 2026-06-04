@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>8.0</LangVersion>
+    <AssemblyName>GrabTokenAzureAD</AssemblyName>
+    <RootNamespace>GrabTokenAzureAD</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="AzureTokenGrabber.cs" />
+    <Compile Include="DeviceCodeGrabber.cs" />
+    <Compile Include="PrtExtractor.cs" />
+    <Compile Include="TokenResult.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web" />
+  </ItemGroup>
+
+</Project>

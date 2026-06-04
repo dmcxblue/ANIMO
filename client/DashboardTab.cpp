@@ -1,9 +1,6 @@
 #include "DashboardTab.h"
 #include "DashboardWindow.h"
 
-// NO local DB on client:
-// #include "../server/SessionDBManager.h"   // <-- removed
-
 #include <QTextCharFormat>
 #include <QDebug>
 #include <QTextCursor>
@@ -16,6 +13,10 @@
 #include <QTextEdit>
 #include <QLineEdit>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QShortcut>
+#include <QKeySequence>
 #include <QApplication>
 #include <QTimer>
 
@@ -163,10 +164,25 @@ DashboardTab::DashboardTab(const QString &label,
     loadCommandHistory();
     setupPowerShellCompletion();
 
+    // Clear console button
+    clearBtn = new QPushButton("Clear", this);
+    clearBtn->setFixedWidth(60);
+    clearBtn->setToolTip("Clear console output (Ctrl+L)");
+    connect(clearBtn, &QPushButton::clicked, this, &DashboardTab::clearConsole);
+
     QVBoxLayout *layout = new QVBoxLayout(this);
     layout->addWidget(output);
-    layout->addWidget(queryInput);
+
+    // Bottom row: input + clear button
+    QHBoxLayout *bottomRow = new QHBoxLayout();
+    bottomRow->addWidget(queryInput);
+    bottomRow->addWidget(clearBtn);
+    layout->addLayout(bottomRow);
     setLayout(layout);
+
+    // Ctrl+L shortcut to clear console
+    QShortcut *clearShortcut = new QShortcut(QKeySequence("Ctrl+L"), this);
+    connect(clearShortcut, &QShortcut::activated, this, &DashboardTab::clearConsole);
 
     // ====== SERVER-DRIVEN OUTPUT HOOKS ======
     QObject *transportObj = locateTransport(parentDashboard);
@@ -669,4 +685,17 @@ void DashboardTab::saveCommandHistory() {
     } else {
         qWarning() << "[DashboardTab] Failed to save command history to" << historyFile;
     }
+}
+
+void DashboardTab::clearConsole() {
+    if (output) {
+        output->clear();
+        // Show a subtle message so user knows it worked
+        QTextCursor cursor = output->textCursor();
+        ansiToQText(cursor, "\x1b[90m[Console cleared]\x1b[0m\n");
+        output->moveCursor(QTextCursor::End);
+    }
+    // Also clear pending command buffers since they were already displayed or are stale
+    pendingCommands.clear();
+    currentCmdId.clear();
 }
