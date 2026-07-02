@@ -19,3 +19,7 @@ echo
 echo "Binaries:"
 echo "  $BUILD_DIR/server/AnimoServer"
 echo "  $BUILD_DIR/client/AnimoClient"
+
+echo
+echo "Running unit tests..."
+ctest --output-on-failure

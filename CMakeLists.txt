@@ -19,10 +19,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
-# Find Qt6 globally
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Sql Network WebEngineWidgets)
+# Find Qt6 globally (Test is optional at configure but required for the tests/ target)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Sql Network WebEngineWidgets Test)
+
+enable_testing()
 
 # Subprojects
 add_subdirectory(shared)
 add_subdirectory(server)
 add_subdirectory(client)
+add_subdirectory(tests)
