@@ -9,6 +9,8 @@
 #include <QJsonObject>
 #include "PRTTokenExchanger.h"
 
+class ClientIdSelector;
+
 class PRTTokenUI : public QWidget {
     Q_OBJECT
 public:
@@ -24,7 +26,7 @@ private:
     QString b64UrlDecodeToJsonField(const QString &jwtToken, const QString &field);
     QObject* locateTransport();
 
-    QLineEdit *clientId;
+    ClientIdSelector *clientId;
     QLineEdit *tenant;
     QLineEdit *resource;
     QTextEdit *prtToken;

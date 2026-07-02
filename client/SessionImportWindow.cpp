@@ -1,4 +1,5 @@
 #include "SessionImportWindow.h"
+#include "TokenStore.h"
 #include "network/ClientTransport.h"
 #include "../shared/CryptoHelper.h"
 #include "../shared/Protocol.h"
@@ -382,6 +383,20 @@ void SessionImportWindow::sendImportData() {
 
         m_transport->sendJson(request);
         m_pendingImports++;
+
+        // Mirror into TokenStore so imported users show up in every plugin
+        // window's UserSelectorWidget without needing to reconnect.
+        const QString sessionId = tok.value("session_id").toString();
+        if (!sessionId.isEmpty() && !tok.value("access_token").toString().isEmpty()) {
+            TokenInfo tokenInfo;
+            tokenInfo.accessToken  = tok.value("access_token").toString();
+            tokenInfo.refreshToken = tok.value("refresh_token").toString();
+            tokenInfo.idToken      = tok.value("id_token").toString();
+            tokenInfo.upn          = tok.value("user").toString();
+            tokenInfo.tenantId     = tok.value("tenant_id").toString();
+            tokenInfo.resource     = tok.value("resource").toString();
+            TokenStore::instance()->storeToken(sessionId, tokenInfo);
+        }
     }
 
     if (m_pendingImports == 0) {

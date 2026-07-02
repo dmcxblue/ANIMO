@@ -11,6 +11,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+class ClientIdSelector;
+
 class RequestRefreshTokens : public QWidget {
     Q_OBJECT
 public:
@@ -31,7 +33,7 @@ private:
     QLineEdit *domainInput;
     QLineEdit *resourceInput;
     QLineEdit *userAgentInput;
-    QLineEdit *clientIdInput;
+    ClientIdSelector *clientIdInput;
     QTextEdit *resultOutput;
     QPushButton *fetchBtn;
 

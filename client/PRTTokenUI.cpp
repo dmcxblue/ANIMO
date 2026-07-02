@@ -1,4 +1,6 @@
 #include "PRTTokenUI.h"
+#include "ClientIdSelector.h"
+#include "TokenStore.h"
 #include "../shared/Protocol.h"
 #include <QRegularExpression>
 #include <QDebug>
@@ -31,10 +33,9 @@ PRTTokenUI::PRTTokenUI(QWidget *parent) : QWidget(parent) {
     layout->addWidget(new QLabel("Tenant (REQUIRED):"));
     layout->addWidget(tenant);
 
-    clientId = new QLineEdit();
-    clientId->setText("1fec8e78-bce4-4aaf-ab1b-5451cc387264"); // Microsoft Teams - reliable for PRT
-    clientId->setPlaceholderText("Client ID (default: Microsoft Teams)");
-    layout->addWidget(new QLabel("Client ID:"));
+    // Microsoft Teams — reliable default for PRT exchange
+    clientId = new ClientIdSelector(this, "1fec8e78-bce4-4aaf-ab1b-5451cc387264");
+    layout->addWidget(new QLabel("Client ID (choose from list or paste your own):"));
     layout->addWidget(clientId);
 
     resource = new QLineEdit();
@@ -147,8 +148,16 @@ void PRTTokenUI::performExchange() {
     qDebug() << "[PRTTokenUI] Original token length:" << rawInput.length();
     qDebug() << "[PRTTokenUI] Cleaned token length:" << cleanedPrtToken.length();
 
+    const QString effectiveClientId = clientId->currentClientId();
+    if (effectiveClientId.isEmpty()) {
+        QMessageBox::warning(this, "Missing Client ID",
+            "Select a well-known client ID from the dropdown, "
+            "or paste a valid GUID.");
+        return;
+    }
+
     auto *ex = new PRTTokenExchanger(
-        clientId->text().trimmed(),
+        effectiveClientId,
         tenant->text().trimmed(),
         resource->text().trimmed(),
         cleanedPrtToken,
@@ -222,6 +231,16 @@ void PRTTokenUI::logTokenToServer(const QString &accessToken, const QString &ref
 
     // Send to server
     QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
+
+    // Mirror into TokenStore so this token is immediately visible to every
+    // plugin window's UserSelectorWidget without needing a reconnect.
+    TokenInfo tokenInfo;
+    tokenInfo.accessToken  = accessToken;
+    tokenInfo.refreshToken = refreshToken;
+    tokenInfo.upn          = upn;
+    tokenInfo.tenantId     = tenantId;
+    tokenInfo.resource     = resourceVal;
+    TokenStore::instance()->storeToken(sessionId, tokenInfo);
 
     qInfo() << "[PRTTokenUI] Token logged to server | User:" << upn << "| Tenant:" << tenantId;
 }

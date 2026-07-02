@@ -1,5 +1,6 @@
 #include "CredentialLoginWindow.h"
 #include "DashboardWindow.h"
+#include "TokenStore.h"
 #include "network/ClientTransport.h"
 #include "../shared/Protocol.h"
 
@@ -476,6 +477,16 @@ void CredentialLoginWindow::logTokenToServer(const QString &sessionId,
     } else {
         QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
     }
+
+    // Mirror into TokenStore so plugin windows' UserSelectorWidget see this
+    // user immediately, without waiting for a reconnect bootstrap.
+    TokenInfo tokenInfo;
+    tokenInfo.accessToken  = accessToken;
+    tokenInfo.refreshToken = refreshToken;
+    tokenInfo.upn          = user;
+    tokenInfo.tenantId     = tenantId;
+    tokenInfo.resource     = resource;
+    TokenStore::instance()->storeToken(sessionId, tokenInfo);
 
     qDebug() << "[CredentialLogin] Token logged to server for session:" << sessionId;
 }

@@ -1,5 +1,7 @@
 #include "RequestRefreshTokens.h"
+#include "ClientIdSelector.h"
 #include "NetworkHelper.h"
+#include "TokenStore.h"
 #include "../shared/Protocol.h"
 #include <QUrlQuery>
 #include <QNetworkRequest>
@@ -36,9 +38,9 @@ RequestRefreshTokens::RequestRefreshTokens(QWidget *parent)
     userAgentInput->setText("Azure/1.0"); // Default
     layout->addWidget(userAgentInput);
 
-    layout->addWidget(new QLabel("Client ID"));
-    clientIdInput = new QLineEdit();
-    clientIdInput->setText("d3590ed6-52b3-4102-aeff-aad2292ab01c"); // Default
+    layout->addWidget(new QLabel("Client ID (FOCI app or paste custom GUID)"));
+    // Microsoft Office is the historical default for this window.
+    clientIdInput = new ClientIdSelector(this, "d3590ed6-52b3-4102-aeff-aad2292ab01c");
     layout->addWidget(clientIdInput);
 
     fetchBtn = new QPushButton("Get Access Token");
@@ -56,7 +58,7 @@ void RequestRefreshTokens::handleRequest() {
     refreshToken = refreshInput->toPlainText().trimmed();
     domain = domainInput->text().trimmed();
     resource = resourceInput->text().trimmed();
-    clientId = clientIdInput->text().trimmed();
+    clientId = clientIdInput->currentClientId();
     userAgent = userAgentInput->text().trimmed();
 
     if (refreshToken.isEmpty() || domain.isEmpty() || resource.isEmpty() || clientId.isEmpty() || userAgent.isEmpty()) {
@@ -222,6 +224,16 @@ void RequestRefreshTokens::logTokenToServer(const QString &accessToken, const QS
 
     // Send to server
     QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
+
+    // Mirror into TokenStore so this token is immediately visible to every
+    // plugin window's UserSelectorWidget without needing a reconnect.
+    TokenInfo tokenInfo;
+    tokenInfo.accessToken  = accessToken;
+    tokenInfo.refreshToken = refreshToken;
+    tokenInfo.upn          = upn;
+    tokenInfo.tenantId     = tenantId;
+    tokenInfo.resource     = resourceVal;
+    TokenStore::instance()->storeToken(sessionId, tokenInfo);
 
     qInfo() << "[RequestRefreshTokens] Token logged to server | User:" << upn << "| Tenant:" << tenantId;
 }
