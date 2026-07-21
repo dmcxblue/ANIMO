@@ -45,6 +45,7 @@ private:
     void logSuccess(const QString &msg);
     void logError(const QString &msg);
     void sprayApp(const QString &appName, const QString &appId, const QString &version);
+    void checkPrivileges(const QString &appName, const QString &appId, const QString &accessToken);
     void addResult(const QString &appName, const QString &appId, bool success,
                    const QString &scopes, const QString &error = QString());
     void setLoading(bool loading);
