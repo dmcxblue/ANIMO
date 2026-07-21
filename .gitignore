@@ -31,16 +31,6 @@ error.log.*
 *.animosession
 *.animosessions
 
-
-# Documentation (keep internal, not in repo)
-docs/
-
-# Internal development notes
-IMPROVEMENTS.md
-LOGGING_IMPROVEMENTS.md
-TESTING_NOTES.md
-CHANGELOG.md
-
 # IDE / Editor
 .vscode/
 .idea/
