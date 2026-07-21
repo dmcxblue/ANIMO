@@ -63,6 +63,14 @@ static QHash<QString, AuthState> g_authState;
 // ===== Helpers (define once) ===============================================
 static inline QByteArray toBytes(const QJsonObject &o) { return Protocol::toBytes(o); }
 
+// sessionId is used to build filesystem paths, so reject anything outside this
+// charset/length (prevents path traversal like "../../foo").
+static inline bool isValidSessionId(const QString &sid) {
+    static const QRegularExpression sessionIdRe(
+        QStringLiteral("^[a-zA-Z0-9_\\-]{1,64}$"));
+    return sessionIdRe.match(sid).hasMatch();
+}
+
 // Load PowerShell script from Qt resources
 static QByteArray loadScript(const QString &resourcePath) {
     QFile file(resourcePath);
@@ -902,6 +910,14 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 .arg(ps1Path, credPath);
             proc->write(execCmd.toUtf8());
 
+            // The script deletes this after reading, but wipe it here too in case
+            // pwsh never starts and the plaintext secret is left on disk.
+            QTimer::singleShot(15000, this, [credPath]() {
+                if (QFile::exists(credPath)) {
+                    QFile::remove(credPath);
+                }
+            });
+
             QJsonObject ack = Protocol::ok("new_session ok");
             ack.insert("sessionId", sid);
             sendTo(sock, ack);
@@ -1070,6 +1086,10 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             sendTo(sock, Protocol::err("missing sessionId or command"));
             return true;
         }
+        if (!isValidSessionId(sid)) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
+        }
 
         // Validate command length to prevent memory exhaustion
         if (cmd.size() > MAX_CMD_LENGTH) {
@@ -1191,6 +1211,10 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             sendTo(sock, Protocol::err("missing sessionId"));
             return true;
         }
+        if (!isValidSessionId(sid)) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
+        }
 
         // Ensure process exists/starts and subscribe caller
         QProcess *proc = ensureProcess(this, sid);
@@ -1309,6 +1333,10 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             sendTo(sock, Protocol::err("missing sessionId"));
             return true;
         }
+        if (!isValidSessionId(sid)) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
+        }
         // Ensure process exists and subscribe
         QProcess *proc = ensureProcess(this, sid);
         if (!proc) {
@@ -1371,6 +1399,10 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             sendTo(sock, Protocol::err("missing required fields for token logging"));
             return true;
         }
+        if (!isValidSessionId(sessionId)) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
+        }
 
         bool success = SessionDBManager::instance().logToken(
             sessionId, source, accessToken, refreshToken, idToken,
@@ -1395,6 +1427,9 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         if (sessionId.isEmpty()) {
             // Get all tokens
             tokens = SessionDBManager::instance().getAllTokens();
+        } else if (!isValidSessionId(sessionId)) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
         } else {
             // Get tokens for specific session
             tokens = SessionDBManager::instance().getTokensBySession(sessionId);
