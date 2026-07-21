@@ -1,4 +1,5 @@
 #include "GraphQueryWindow.h"
+#include "StyleManager.h"
 #include "GraphBodyDialog.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
@@ -41,7 +42,7 @@ GraphQueryWindow::GraphQueryWindow(QWidget* parent)
 
     auto *autoFetchRow = new QHBoxLayout();
     m_autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    m_autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(m_autoFetchBtn);
     autoFetchRow->addWidget(m_autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -303,9 +304,9 @@ void GraphQueryWindow::updateTokenStatus() {
     QString token = m_tokenEdit->text().trimmed();
     if (token.isEmpty()) {
         m_tokenStatus->setText("No Token");
-        m_tokenStatus->setStyleSheet("color: gray;");
+        m_tokenStatus->setStyleSheet(StyleManager::tokenStatusEmptyStyle());
     } else {
         m_tokenStatus->setText("Ready");
-        m_tokenStatus->setStyleSheet("color: #00ff00;");
+        m_tokenStatus->setStyleSheet(StyleManager::tokenStatusReadyStyle());
     }
 }

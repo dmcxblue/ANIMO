@@ -1,4 +1,5 @@
 #include "AzureEnumWindow.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
 #include "NetworkHelper.h"
@@ -51,7 +52,7 @@ void AzureEnumWindow::setupUi() {
     // Auto-fetch row
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -82,7 +83,7 @@ void AzureEnumWindow::setupUi() {
     enumManagedIdBtn->setEnabled(false);
     enumManagedIdBtn->setToolTip("Find VMs and other resources with managed identities (potential for token theft)");
     cancelBtn = new QPushButton("Cancel", this);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     copyBtn = new QPushButton("Copy Selected", this);
 

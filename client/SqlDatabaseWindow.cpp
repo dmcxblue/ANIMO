@@ -1,4 +1,5 @@
 #include "SqlDatabaseWindow.h"
+#include "StyleManager.h"
 #include "TokenHelper.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
@@ -89,7 +90,7 @@ void SqlDatabaseWindow::setupUi() {
     // Auto-fetch button row
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Tokens for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenGroupLayout->addLayout(autoFetchRow);
@@ -190,7 +191,7 @@ void SqlDatabaseWindow::setupUi() {
     // Run query button
     auto *credBtnRow = new QHBoxLayout();
     credQueryBtn = new QPushButton("Run Query", this);
-    credQueryBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(credQueryBtn);
     credBtnRow->addWidget(credQueryBtn);
     credBtnRow->addStretch();
     credGroupLayout->addLayout(credBtnRow);
@@ -249,7 +250,7 @@ void SqlDatabaseWindow::setupUi() {
     controlLayout2->addWidget(downloadSchemaBtn);
     controlLayout2->addWidget(downloadDataBtn);
     cancelBtn = new QPushButton("Cancel", this);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     controlLayout2->addWidget(cancelBtn);
     controlLayout2->addStretch();

@@ -20,7 +20,7 @@ SPNLoginWindow::SPNLoginWindow(DashboardWindow *parentDashboard, QWidget *parent
 {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("Azure Login (Service Principal)");
-    setFixedSize(440, 320);
+    setMinimumSize(440, 320);  // min, not fixed, so error text can grow
     setupUi();
     wireTransport();
 }
@@ -68,7 +68,13 @@ void SPNLoginWindow::setupUi() {
     layout->addWidget(tenantIdEdit);
 
     loginBtn = new QPushButton("Authenticate", this);
+    loginBtn->setDefault(true);
     layout->addWidget(loginBtn);
+
+    // Enter submits from any field
+    connect(appIdEdit,    &QLineEdit::returnPressed, loginBtn, &QPushButton::click);
+    connect(secretEdit,   &QLineEdit::returnPressed, loginBtn, &QPushButton::click);
+    connect(tenantIdEdit, &QLineEdit::returnPressed, loginBtn, &QPushButton::click);
 
     statusLabel = new QLabel(this);
     statusLabel->setVisible(false);

@@ -1,4 +1,6 @@
 #include "OutlookEmailWindow.h"
+#include "TablePlaceholder.h"
+#include "StyleManager.h"
 #include "HtmlReplyDialog.h"
 #include "TokenStore.h"
 #include "UserSelectorWidget.h"
@@ -36,7 +38,7 @@ OutlookEmailWindow::OutlookEmailWindow(QWidget *parent)
 
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -77,6 +79,7 @@ OutlookEmailWindow::OutlookEmailWindow(QWidget *parent)
     // Split view
     auto *splitRow = new QHBoxLayout();
     lstEmails = new QListWidget(this);
+    new TablePlaceholder(lstEmails, "No emails loaded.");
     lstEmails->setFixedWidth(420);
     lstEmails->setSelectionMode(QAbstractItemView::ExtendedSelection);  // Enable multi-selection
     lstEmails->setStyleSheet(
@@ -153,7 +156,7 @@ OutlookEmailWindow::OutlookEmailWindow(QWidget *parent)
     btnTemplates->setToolTip("Load email templates for phishing scenarios");
 
     cancelBtn = new QPushButton("Cancel", this);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
 
     bulkActions->addWidget(cancelBtn);
@@ -1077,10 +1080,10 @@ void OutlookEmailWindow::autoFetchTokens() {
 void OutlookEmailWindow::updateTokenStatus() {
     if (accessToken.isEmpty()) {
         tokenStatus->setText("No Token");
-        tokenStatus->setStyleSheet("color: gray;");
+        tokenStatus->setStyleSheet(StyleManager::tokenStatusEmptyStyle());
     } else {
         tokenStatus->setText("Ready");
-        tokenStatus->setStyleSheet("color: #00ff00;");
+        tokenStatus->setStyleSheet(StyleManager::tokenStatusReadyStyle());
     }
 }
 

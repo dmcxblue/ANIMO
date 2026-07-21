@@ -1,4 +1,5 @@
 #include "EmailRulesWindow.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
 #include "WindowHelper.h"
@@ -49,7 +50,7 @@ void EmailRulesWindow::setupUi() {
 
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -80,12 +81,12 @@ void EmailRulesWindow::setupUi() {
 
     auto *rulesHeader = new QHBoxLayout();
     listRulesBtn = new QPushButton("List Existing Rules", this);
-    listRulesBtn->setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; }");
+    StyleManager::applySuccessStyle(listRulesBtn);
     deleteRuleBtn = new QPushButton("Delete Selected", this);
-    deleteRuleBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; }");
+    StyleManager::applyDangerStyle(deleteRuleBtn);
     deleteRuleBtn->setEnabled(false);
     cancelBtn = new QPushButton("Cancel", this);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     rulesHeader->addWidget(listRulesBtn);
     rulesHeader->addWidget(deleteRuleBtn);
@@ -229,10 +230,10 @@ void EmailRulesWindow::updateTokenStatus() {
     QString token = tokenInput->text().trimmed();
     if (token.isEmpty()) {
         tokenStatus->setText("No Token");
-        tokenStatus->setStyleSheet("color: gray;");
+        tokenStatus->setStyleSheet(StyleManager::tokenStatusEmptyStyle());
     } else {
         tokenStatus->setText("Ready");
-        tokenStatus->setStyleSheet("color: #00ff00;");
+        tokenStatus->setStyleSheet(StyleManager::tokenStatusReadyStyle());
     }
 }
 

@@ -1,4 +1,5 @@
 #include "TokenLogWindow.h"
+#include "TablePlaceholder.h"
 #include "ClientTransport.h"
 #include "../shared/Protocol.h"
 
@@ -46,6 +47,7 @@ void TokenLogWindow::setupUI()
 
     // Token table
     tokenTable = new QTableWidget(this);
+    new TablePlaceholder(tokenTable, "No tokens logged yet.");
     tokenTable->setColumnCount(6);
     tokenTable->setHorizontalHeaderLabels({"ID", "Timestamp", "Source", "User (UPN)", "Tenant ID", "Resource (Audience)"});
     tokenTable->setSelectionBehavior(QAbstractItemView::SelectRows);

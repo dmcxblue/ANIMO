@@ -211,7 +211,13 @@ void IllicitConsentGrant::exchangeCodeForToken(const QString &code) {
     QNetworkReply *reply = netManager->post(request, bodyData);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
-            tokenOutput->append(QString("<pre>Error: %1</pre><hr>").arg(reply->errorString()));
+            // The token endpoint returns the real reason in the body (error_description)
+            // on a 400; fall back to the transport error only if there's nothing there.
+            const QJsonObject errObj = QJsonDocument::fromJson(reply->readAll()).object();
+            QString detail = errObj.value("error_description").toString();
+            if (detail.isEmpty()) detail = errObj.value("error").toString();
+            if (detail.isEmpty()) detail = reply->errorString();
+            tokenOutput->append(QString("<pre>Error: %1</pre><hr>").arg(detail.toHtmlEscaped()));
             reply->deleteLater();
             return;
         }

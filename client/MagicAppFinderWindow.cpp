@@ -1,4 +1,5 @@
 #include "MagicAppFinderWindow.h"
+#include "TablePlaceholder.h"
 #include "UserSelectorWidget.h"
 #include "StyleManager.h"
 #include "NetworkHelper.h"
@@ -65,6 +66,7 @@ void MagicAppFinderWindow::setupUi()
     auto *resultsLayout = new QVBoxLayout(resultsGroup);
 
     resultsTable = new QTableWidget(0, 5, this);
+    new TablePlaceholder(resultsTable, "No apps found yet — run a scan.");
     resultsTable->setHorizontalHeaderLabels({"App Name", "App ID", "Consent Type", "Scope Type", "Redirect URIs"});
     resultsTable->horizontalHeader()->setStretchLastSection(true);
     resultsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);

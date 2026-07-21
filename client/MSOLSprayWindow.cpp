@@ -1,4 +1,5 @@
 #include "MSOLSprayWindow.h"
+#include "StyleManager.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -20,7 +21,7 @@ MSOLSprayWindow::MSOLSprayWindow(QWidget* parent)
     auto *warningLabel = new QLabel(
         "<b>Warning:</b> Azure AD locks accounts after ~10 failed attempts in 5 minutes. "
         "Use rate limiting to avoid detection and lockouts.", this);
-    warningLabel->setStyleSheet("color: #ffc107; padding: 8px; background: #2a2a2a; border-radius: 3px;");
+    warningLabel->setStyleSheet(StyleManager::infoBannerStyle());
     warningLabel->setWordWrap(true);
     layout->addWidget(warningLabel);
 
@@ -75,12 +76,12 @@ MSOLSprayWindow::MSOLSprayWindow(QWidget* parent)
     // Buttons
     QHBoxLayout* btnRow = new QHBoxLayout();
     btnStart = new QPushButton("Start Spray");
-    btnStart->setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; padding: 8px 16px; }");
+    StyleManager::applySuccessStyle(btnStart);
     connect(btnStart, &QPushButton::clicked, this, &MSOLSprayWindow::runSpray);
     btnRow->addWidget(btnStart);
 
     btnStop = new QPushButton("Stop");
-    btnStop->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; padding: 8px 16px; }");
+    StyleManager::applyDangerStyle(btnStop);
     btnStop->setEnabled(false);
     connect(btnStop, &QPushButton::clicked, this, &MSOLSprayWindow::stopSpray);
     btnRow->addWidget(btnStop);

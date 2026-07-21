@@ -1,4 +1,5 @@
 #include "OutlookCalendarWindow.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
 #include "NetworkHelper.h"
@@ -85,7 +86,7 @@ void OutlookCalendarWindow::setupUi() {
 
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -120,7 +121,7 @@ void OutlookCalendarWindow::setupUi() {
     btnDelete = new QPushButton("Delete Selected Event");
     btnRefresh = new QPushButton("Refresh");
     cancelBtn = new QPushButton("Cancel");
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     connect(btnAdd, &QPushButton::clicked, this, &OutlookCalendarWindow::createEvent);
     connect(btnDelete, &QPushButton::clicked, this, &OutlookCalendarWindow::deleteEvent);

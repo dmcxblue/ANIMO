@@ -1,4 +1,5 @@
 #include "ConsentManipulationWindow.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
@@ -110,7 +111,7 @@ void ConsentManipulationWindow::setupUi()
     progressBar = new QProgressBar();
     progressBar->setVisible(false);
     cancelBtn = new QPushButton("Cancel");
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     copyBtn = new QPushButton("Copy Selected");
     exportBtn = new QPushButton("Export Results");

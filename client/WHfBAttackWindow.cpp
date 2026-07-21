@@ -1,4 +1,5 @@
 #include "WHfBAttackWindow.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenStore.h"
 
@@ -58,7 +59,7 @@ void WHfBAttackWindow::setupUi() {
 
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Broker Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -94,7 +95,7 @@ void WHfBAttackWindow::setupUi() {
     auto *controlLayout = new QHBoxLayout();
 
     startDeviceCodeBtn = new QPushButton("Start Device Code Flow", this);
-    startDeviceCodeBtn->setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; padding: 10px 20px; }");
+    StyleManager::applySuccessStyle(startDeviceCodeBtn);
     startDeviceCodeBtn->setToolTip("Start a new device code phishing flow to capture tokens");
 
     startWithTokensBtn = new QPushButton("Start with Existing Tokens", this);

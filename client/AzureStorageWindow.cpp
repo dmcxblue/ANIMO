@@ -1,4 +1,5 @@
 #include "AzureStorageWindow.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
 #include "NetworkHelper.h"
@@ -56,7 +57,7 @@ void AzureStorageWindow::setupUi() {
     // Auto-fetch button
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Tokens for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     autoFetchRow->addStretch();
     tokenLayout->addLayout(autoFetchRow);
@@ -108,7 +109,7 @@ void AzureStorageWindow::setupUi() {
     accountLayout->addWidget(storageAccountCombo);
     accountLayout->addWidget(listContainersBtn);
     cancelBtn = new QPushButton("Cancel", this);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     accountLayout->addWidget(cancelBtn);
     accountLayout->addStretch();

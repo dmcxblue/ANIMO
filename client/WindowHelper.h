@@ -8,6 +8,8 @@
 #include <QStyle>
 #include <QTimer>
 
+#include "WindowStatePersister.h"
+
 /**
  * @brief WindowHelper - Utility class for window positioning and geometry management
  *
@@ -97,10 +99,12 @@ public:
      * @param height Desired height (0 = keep current)
      * @param minWidth Minimum width (0 = no minimum)
      * @param minHeight Minimum height (0 = no minimum)
+     * @param persistGeometry Remember size/position across sessions (keyed by class name)
      */
     static void setupWindow(QWidget *window, QWidget *parent = nullptr,
                             int width = 0, int height = 0,
-                            int minWidth = 0, int minHeight = 0)
+                            int minWidth = 0, int minHeight = 0,
+                            bool persistGeometry = true)
     {
         if (!window) return;
 
@@ -109,18 +113,29 @@ public:
             window->setMinimumSize(minWidth, minHeight);
         }
 
-        // Resize if dimensions specified
-        if (width > 0 && height > 0) {
-            window->resize(width, height);
-        }
-
         // Delete on close
         window->setAttribute(Qt::WA_DeleteOnClose);
 
-        // Center after layout finishes
-        QTimer::singleShot(0, window, [window, parent]() {
-            centerOnParent(window, parent);
-        });
+        // Remember size/position per window type. If we have a saved geometry it wins
+        // over the default resize+center below, so windows reopen where they were left.
+        bool restored = false;
+        if (persistGeometry) {
+            const QString key = QString::fromLatin1(window->metaObject()->className());
+            new WindowStatePersister(window, key);  // parented to window; saves on close
+            restored = restoreGeometry(window, key);
+        }
+
+        if (!restored) {
+            // Resize if dimensions specified
+            if (width > 0 && height > 0) {
+                window->resize(width, height);
+            }
+
+            // Center after layout finishes
+            QTimer::singleShot(0, window, [window, parent]() {
+                centerOnParent(window, parent);
+            });
+        }
     }
 
     /**

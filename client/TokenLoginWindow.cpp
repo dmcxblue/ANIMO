@@ -31,7 +31,7 @@ TokenLoginWindow::TokenLoginWindow(DashboardWindow *parentDashboard, QWidget *pa
     : QWidget(parent), parentDashboard(parentDashboard) {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("Azure Login (Access Token)");
-    setFixedSize(520, 520);
+    setMinimumSize(520, 520);  // min, not fixed, so long tokens and errors fit
     setupUi();
     wireTransport();
 }

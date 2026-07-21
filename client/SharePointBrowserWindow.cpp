@@ -1,4 +1,6 @@
 #include "SharePointBrowserWindow.h"
+#include "TablePlaceholder.h"
+#include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
 #include "NetworkHelper.h"
@@ -35,7 +37,7 @@ SharePointBrowserWindow::SharePointBrowserWindow(const QString &tok, QWidget *pa
 
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     tokenStatus = new QLabel(this);
     tokenStatus->setFixedWidth(80);
@@ -84,6 +86,7 @@ SharePointBrowserWindow::SharePointBrowserWindow(const QString &tok, QWidget *pa
 
     // Tree
     tree = new QTreeWidget();
+    new TablePlaceholder(tree, "Nothing loaded yet.");
     tree->setHeaderLabels({"Name", "Type", "Last Modified"});
     tree->header()->setSectionResizeMode(QHeaderView::Stretch);
     tree->setSelectionMode(QAbstractItemView::ExtendedSelection);  // Enable Shift+Click, Ctrl+Click
@@ -102,7 +105,7 @@ SharePointBrowserWindow::SharePointBrowserWindow(const QString &tok, QWidget *pa
     btnRow->addWidget(uploadButton);
 
     cancelBtn = new QPushButton("Cancel");
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     connect(cancelBtn, &QPushButton::clicked, this, &SharePointBrowserWindow::cancelRequests);
     btnRow->addWidget(cancelBtn);

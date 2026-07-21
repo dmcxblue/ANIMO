@@ -22,7 +22,7 @@ CredentialLoginWindow::CredentialLoginWindow(DashboardWindow *parentDashboard, Q
 {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("Azure Login (Credentials)");
-    setFixedSize(400, 250);
+    setMinimumSize(400, 250);  // min, not fixed, so error text can grow
     setupUi();
 }
 
@@ -46,8 +46,13 @@ void CredentialLoginWindow::setupUi() {
 
     auto *loginButton = new QPushButton("Authenticate", this);
     loginButton->setObjectName(QStringLiteral("authButton"));
+    loginButton->setDefault(true);
     connect(loginButton, &QPushButton::clicked, this, &CredentialLoginWindow::handleLogin);
     layout->addWidget(loginButton);
+
+    // Enter submits from either field
+    connect(username, &QLineEdit::returnPressed, this, &CredentialLoginWindow::handleLogin);
+    connect(password, &QLineEdit::returnPressed, this, &CredentialLoginWindow::handleLogin);
 
     auto *status = new QLabel(this);
     status->setObjectName(QStringLiteral("statusLabel"));

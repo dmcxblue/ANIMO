@@ -1,4 +1,5 @@
 #include "TeamsChatWindow.h"
+#include "StyleManager.h"
 #include "ExternalLinkPage.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
@@ -100,7 +101,7 @@ void TeamsChatWindow::setupUi() {
 
     auto *autoFetchRow = new QHBoxLayout();
     autoFetchBtn = new QPushButton("Auto-Fetch Token for Selected User", this);
-    autoFetchBtn->setStyleSheet("QPushButton { background-color: #2d5aa0; color: white; font-weight: bold; padding: 6px 12px; }");
+    StyleManager::applyPrimaryStyle(autoFetchBtn);
     autoFetchRow->addWidget(autoFetchBtn);
     tokenStatus = new QLabel(this);
     tokenStatus->setFixedWidth(80);
@@ -266,7 +267,7 @@ void TeamsChatWindow::setupUi() {
     formatBar->addWidget(exportBtn);
 
     cancelBtn = new QPushButton("Cancel");
-    cancelBtn->setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; }");
+    StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
     cancelBtn->setFixedWidth(80);
     connect(cancelBtn, &QPushButton::clicked, this, &TeamsChatWindow::cancelRequests);

@@ -1,4 +1,5 @@
 #include "SPNEnumWindow.h"
+#include "TablePlaceholder.h"
 #include "StyleManager.h"
 #include "NetworkHelper.h"
 
@@ -51,6 +52,7 @@ void SPNEnumWindow::setupUi() {
 
     // Results tree
     resultsTree = new QTreeWidget(this);
+    new TablePlaceholder(resultsTree, "No service principals yet — run enumeration.");
     resultsTree->setHeaderLabels({"Display Name", "App ID", "Type", "Sign-In Audience", "Created"});
     resultsTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
     resultsTree->setAlternatingRowColors(true);
