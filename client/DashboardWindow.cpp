@@ -1376,21 +1376,82 @@ void DashboardWindow::refreshTokenForSession(const QString &sessionId) {
         return;
     }
 
+    // Skip if a refresh is already running for this session. The flag clears
+    // when the reply returns, so the next expiry check can retry.
+    if (tokenExp.refreshInFlight) {
+        return;
+    }
+    tokenExp.refreshInFlight = true;
+
     logEvent(QString("[*] Auto-refreshing token for session %1...").arg(sessionId.left(8)));
 
-    // Mark as pending to prevent multiple refresh attempts
-    tokenExp.autoRenewEnabled = false;
+    // Refresh against the AAD token endpoint directly, like autoRestoreSessions().
+    // The server has no refresh_token action.
+    const QString oldRefreshToken = tokenExp.refreshToken;
+    const QString resource = tokenExp.resource;
+    const QString tenantId = tokenExp.tenantId;
 
-    // Send refresh request to server
-    if (transport) {
-        QJsonObject req;
-        req.insert("action", "refresh_token");
-        req.insert("sessionId", sessionId);
-        req.insert("refreshToken", tokenExp.refreshToken);
-        req.insert("resource", tokenExp.resource);
-        req.insert("tenantId", tokenExp.tenantId);
-        transport->sendJson(req);
+    QString url = QString("https://login.microsoftonline.com/%1/oauth2/v2.0/token").arg(tenantId);
+
+    QUrlQuery postData;
+    postData.addQueryItem("client_id", "1950a258-227b-4e31-a9cf-717495945fc2");  // Azure PowerShell
+    postData.addQueryItem("grant_type", "refresh_token");
+    postData.addQueryItem("refresh_token", oldRefreshToken);
+    postData.addQueryItem("scope", resource + "/.default offline_access");
+
+    QNetworkRequest request{QUrl(url)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    NetworkHelper::setRequestTimeout(request);
+
+    auto *nam = new QNetworkAccessManager(this);
+    QNetworkReply *reply = nam->post(request, postData.toString(QUrl::FullyEncoded).toUtf8());
+
+    if (!reply) {
+        logEvent(QString("[-] Failed to create refresh request for %1").arg(sessionId.left(8)));
+        nam->deleteLater();
+        tokenExp.refreshInFlight = false;
+        return;
     }
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, nam, sessionId, oldRefreshToken, resource, tenantId]() {
+        reply->deleteLater();
+        nam->deleteLater();
+
+        // Clear the guard on every path so a later expiry can retry.
+        if (tokenExpiryMap.contains(sessionId)) {
+            tokenExpiryMap[sessionId].refreshInFlight = false;
+        }
+
+        if (reply->error() != QNetworkReply::NoError) {
+            logEvent(QString("[-] Auto-refresh failed for %1: %2")
+                     .arg(sessionId.left(8), reply->errorString()));
+            return;
+        }
+
+        QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isObject()) {
+            logEvent(QString("[-] Auto-refresh: could not parse response for %1").arg(sessionId.left(8)));
+            return;
+        }
+        QJsonObject obj = doc.object();
+
+        const QString newAccessToken = obj.value("access_token").toString();
+        const QString newRefreshToken = obj.value("refresh_token").toString();
+
+        if (newAccessToken.isEmpty()) {
+            logEvent(QString("[-] Auto-refresh: no access token in response for %1").arg(sessionId.left(8)));
+            return;
+        }
+
+        // Preserve the existing refresh token if the response didn't rotate one.
+        const QString effectiveRefresh = newRefreshToken.isEmpty() ? oldRefreshToken : newRefreshToken;
+
+        // Updates TokenStore, the expiry map and persistence, and rebuilds the entry.
+        setSessionTokenExpiry(sessionId, newAccessToken, effectiveRefresh, resource, tenantId);
+
+        logEvent(QString("[+] Auto-renewed token for session %1").arg(sessionId.left(8)));
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

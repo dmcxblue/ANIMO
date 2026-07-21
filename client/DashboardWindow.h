@@ -32,6 +32,7 @@ struct TokenExpiry {
     QString resource;
     QString tenantId;
     bool autoRenewEnabled = true;
+    bool refreshInFlight = false;  // guards against overlapping auto-refreshes
 };
 
 class DashboardWindow : public QMainWindow {
