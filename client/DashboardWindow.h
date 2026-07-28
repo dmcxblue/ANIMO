@@ -157,6 +157,7 @@ public slots:
     void openConsentManipulationWindow();
     void openAuthMethodPersistenceWindow();
     void openDeviceJoinWindow();
+    void openRemoteExecWindow();
 
     // Auto session persistence
     void autoRestoreSessions();

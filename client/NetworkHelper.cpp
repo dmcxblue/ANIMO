@@ -59,6 +59,22 @@ QNetworkRequest NetworkHelper::formUrlEncodedRequest(const QString &url)
     return formUrlEncodedRequest(QUrl(url));
 }
 
+QNetworkRequest NetworkHelper::genericRequest(const QUrl &url,
+                                              const QMap<QString, QString> &headers,
+                                              const QByteArray &contentType,
+                                              int timeoutMs)
+{
+    QNetworkRequest req{url};
+    if (!contentType.isEmpty()) {
+        req.setHeader(QNetworkRequest::ContentTypeHeader, contentType);
+    }
+    for (auto it = headers.constBegin(); it != headers.constEnd(); ++it) {
+        req.setRawHeader(it.key().toUtf8(), it.value().toUtf8());
+    }
+    req.setTransferTimeout(timeoutMs);
+    return req;
+}
+
 QString NetworkHelper::parseApiError(QNetworkReply *reply, const QByteArray &responseBody)
 {
     if (!reply) {

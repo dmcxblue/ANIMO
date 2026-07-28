@@ -59,6 +59,7 @@ public:
     static QWidget* createConsentManipulationWindow(QWidget *parent = nullptr);
     static QWidget* createAuthMethodPersistenceWindow(QWidget *parent = nullptr);
     static QWidget* createDeviceJoinWindow(QWidget *parent = nullptr);
+    static QWidget* createRemoteExecWindow(QWidget *parent = nullptr);
 
     // Reporting / Timeline
     static QWidget* createSessionTimelineWindow(QWidget *parent = nullptr);

@@ -137,6 +137,8 @@ void DashboardWindow::initUI()
     QMenu *persistenceMenu   = menuBar->addMenu("Persistence");
     // Top-level clickable entry (not a sub-menu item) - opens the Post-Exploitation tools.
     menuBar->addAction("Post-Exploitation", this, &DashboardWindow::openPostExploitWindow);
+    // Remote Exec is its own top-level - shell UI over pluggable transports.
+    menuBar->addAction("Remote Exec", this, &DashboardWindow::openRemoteExecWindow);
     QMenu *logsMenu          = menuBar->addMenu("Logs");
     QMenu *helpMenu          = menuBar->addMenu("Help");
 
@@ -1747,6 +1749,12 @@ void DashboardWindow::openAuthMethodPersistenceWindow() {
 void DashboardWindow::openDeviceJoinWindow() {
     auto *win = WindowFactory::createDeviceJoinWindow();
     WindowHelper::setupWindow(win, this, 1050, 780, 900, 600);
+    win->show();
+}
+
+void DashboardWindow::openRemoteExecWindow() {
+    auto *win = WindowFactory::createRemoteExecWindow();
+    WindowHelper::setupWindow(win, this, 1300, 820, 1000, 600);
     win->show();
 }
 

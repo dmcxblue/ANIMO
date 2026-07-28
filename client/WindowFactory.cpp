@@ -44,6 +44,7 @@
 #include "ConsentManipulationWindow.h"
 #include "AuthMethodPersistenceWindow.h"
 #include "DeviceJoinWindow.h"
+#include "RemoteExecWindow.h"
 
 // Reporting / Timeline
 #include "SessionTimelineWindow.h"
@@ -207,6 +208,10 @@ QWidget* WindowFactory::createAuthMethodPersistenceWindow(QWidget *parent) {
 
 QWidget* WindowFactory::createDeviceJoinWindow(QWidget *parent) {
     return new DeviceJoinWindow(parent);
+}
+
+QWidget* WindowFactory::createRemoteExecWindow(QWidget *parent) {
+    return new RemoteExecWindow(parent);
 }
 
 // ============================================================================

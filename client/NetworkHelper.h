@@ -5,6 +5,8 @@
 #include <QNetworkReply>
 #include <QUrl>
 #include <QString>
+#include <QMap>
+#include <QByteArray>
 #include <functional>
 
 /**
@@ -73,6 +75,24 @@ public:
      */
     static QNetworkRequest formUrlEncodedRequest(const QUrl &url);
     static QNetworkRequest formUrlEncodedRequest(const QString &url);
+
+    /**
+     * @brief Create an arbitrary-header HTTP request (no bearer auth).
+     *
+     * Every other builder above hardcodes Bearer + JSON, which is fine for
+     * Azure / Graph / ARM but wrong for HTTP webshells / SSTI targets. This
+     * builder gives the caller full control - no auth is added, headers are
+     * copied verbatim, Content-Type is whatever the caller specifies.
+     *
+     * @param url          Target URL (arbitrary host allowed)
+     * @param headers      Raw headers (key -> value); pass empty for none
+     * @param contentType  Value for Content-Type; pass empty to skip
+     * @param timeoutMs    Transfer timeout in ms
+     */
+    static QNetworkRequest genericRequest(const QUrl &url,
+                                           const QMap<QString, QString> &headers,
+                                           const QByteArray &contentType,
+                                           int timeoutMs = DEFAULT_TIMEOUT_MS);
 
     /**
      * @brief Parse Microsoft API error response
