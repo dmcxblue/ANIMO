@@ -12,6 +12,8 @@ moc_*
 qrc_*
 ui_*
 *_autogen/
+.qt/
+**/.qt/
 
 # Binaries
 AnimoServer
@@ -67,3 +69,7 @@ vgcore.*
 *.tmp
 *.bak
 *.orig
+
+# Debug log mirrors written by the runtime (see DEBUGGING.md)
+animo-*-dbg.log
+animo-*-gdb.log
