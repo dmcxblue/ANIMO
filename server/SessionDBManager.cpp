@@ -100,6 +100,7 @@ bool SessionDBManager::initMainDB() {
     execMigration("ALTER TABLE sessions ADD COLUMN Alive INTEGER DEFAULT 0", "add Alive");
     execMigration("ALTER TABLE sessions ADD COLUMN LastSeen DATETIME", "add LastSeen");
     execMigration("ALTER TABLE sessions ADD COLUMN Status TEXT DEFAULT 'pending'", "add Status");
+    execMigration("ALTER TABLE sessions ADD COLUMN CreatedBy TEXT DEFAULT 'legacy'", "add CreatedBy");
 
     // UpdatedAt trigger (best-effort, log if creation fails)
     if (!q.exec(
@@ -187,6 +188,10 @@ bool SessionDBManager::initMainDB() {
     }
     q.exec("PRAGMA foreign_keys = ON");
 
+    // Operator attribution: who captured each token (added after the FK migration
+    // above so it applies to the finalized tokens table).
+    execMigration("ALTER TABLE tokens ADD COLUMN captured_by TEXT DEFAULT 'legacy'", "add captured_by");
+
     // Create index on session_id for faster queries
     if (!q.exec("CREATE INDEX IF NOT EXISTS idx_tokens_session ON tokens(session_id)")) {
         qWarning() << "[DB] Failed to create session index:" << q.lastError().text();
@@ -197,7 +202,64 @@ bool SessionDBManager::initMainDB() {
         qWarning() << "[DB] Failed to create timestamp index:" << q.lastError().text();
     }
 
+    // Operator activity audit log - append-only "who did what when".
+    if (!q.exec(
+        "CREATE TABLE IF NOT EXISTS audit_log ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        " operator TEXT NOT NULL,"
+        " action TEXT NOT NULL,"
+        " target TEXT,"
+        " detail TEXT"
+        ")"
+    )) {
+        qWarning() << "[DB] create audit_log failed:" << q.lastError().text();
+    }
+
     return true;
+}
+
+bool SessionDBManager::logAudit(const QString &op, const QString &action,
+                                const QString &target, const QString &detail)
+{
+    QMutexLocker locker(&m_mutex);
+    if (!initMainDB()) return false;
+
+    QSqlQuery q(m_mainDb);
+    q.prepare("INSERT INTO audit_log (operator, action, target, detail) VALUES (?, ?, ?, ?)");
+    q.addBindValue(op.isEmpty() ? QStringLiteral("unknown") : op);
+    q.addBindValue(action);
+    q.addBindValue(target);
+    q.addBindValue(detail);
+    if (!q.exec()) {
+        qWarning() << "[DB] audit insert failed:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QJsonArray SessionDBManager::getAuditLog(int limit)
+{
+    QMutexLocker locker(&m_mutex);
+    QJsonArray arr;
+    if (!initMainDB()) return arr;
+
+    QSqlQuery q(m_mainDb);
+    q.prepare("SELECT timestamp, operator, action, target, detail "
+              "FROM audit_log ORDER BY id DESC LIMIT ?");
+    q.addBindValue(limit > 0 ? limit : 500);
+    if (q.exec()) {
+        while (q.next()) {
+            QJsonObject o;
+            o.insert("timestamp", q.value(0).toString());
+            o.insert("operator",  q.value(1).toString());
+            o.insert("action",    q.value(2).toString());
+            o.insert("target",    q.value(3).toString());
+            o.insert("detail",    q.value(4).toString());
+            arr.append(o);
+        }
+    }
+    return arr;
 }
 
 QSqlDatabase SessionDBManager::mainDb() const {
@@ -208,16 +270,18 @@ bool SessionDBManager::addSessionToMainDB(const QString &sessionId,
                                           const QString &user,
                                           const QString &tenantId,
                                           const QString &defaultDomain,
-                                          const QString &resource)
+                                          const QString &resource,
+                                          const QString &createdBy)
 {
     QMutexLocker locker(&m_mutex);
     if (!initMainDB()) return false;
 
     QSqlQuery q(m_mainDb);
-    // upsert
+    // Upsert. CreatedBy is set on first insert and deliberately NOT in the DO UPDATE
+    // clause, so the original creator is preserved across later updates.
     q.prepare(
-        "INSERT INTO sessions (SessionID,User,TenantID,DefaultDomain,Resource) "
-        "VALUES (?,?,?,?,?) "
+        "INSERT INTO sessions (SessionID,User,TenantID,DefaultDomain,Resource,CreatedBy) "
+        "VALUES (?,?,?,?,?,?) "
         "ON CONFLICT(SessionID) DO UPDATE SET "
         "  User=excluded.User, "
         "  TenantID=excluded.TenantID, "
@@ -229,6 +293,7 @@ bool SessionDBManager::addSessionToMainDB(const QString &sessionId,
     q.addBindValue(tenantId);
     q.addBindValue(defaultDomain);
     q.addBindValue(resource);
+    q.addBindValue(createdBy);
 
     if (!q.exec()) {
         qWarning() << "[DB] upsert session failed:" << q.lastError().text();
@@ -238,6 +303,7 @@ bool SessionDBManager::addSessionToMainDB(const QString &sessionId,
 }
 
 bool SessionDBManager::updateSessionUser(const QString &sessionId, const QString &username) {
+    QMutexLocker locker(&m_mutex);  // serialize with addSessionToMainDB and other DB writes
     if (!initMainDB()) return false;
 
     QSqlQuery q(m_mainDb);
@@ -256,6 +322,7 @@ void SessionDBManager::updateSessionTenant(const QString &sessionId,
                                            const QString &tenantId,
                                            const QString &defaultDomain)
 {
+    QMutexLocker locker(&m_mutex);  // serialize with addSessionToMainDB and other DB writes
     if (!initMainDB()) return;
 
     QSqlQuery q(m_mainDb);
@@ -312,6 +379,13 @@ bool SessionDBManager::createSessionDB(const QString &sessionId) {
             qWarning() << "[DB] Migration warning (add cmd_id):" << err;
         }
     }
+    // Migration: add run_by column (operator who ran the command)
+    if (!mig.exec("ALTER TABLE history_v2 ADD COLUMN run_by TEXT DEFAULT 'legacy'")) {
+        QString err = mig.lastError().text();
+        if (!err.contains("duplicate column", Qt::CaseInsensitive)) {
+            qWarning() << "[DB] Migration warning (add run_by):" << err;
+        }
+    }
     q.exec(
         "CREATE TABLE IF NOT EXISTS history ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -325,7 +399,8 @@ bool SessionDBManager::createSessionDB(const QString &sessionId) {
 void SessionDBManager::insertCommandOutput(const QString &sessionId,
                                            const QString &command,
                                            const QString &output,
-                                           const QString &cmdId)
+                                           const QString &cmdId,
+                                           const QString &runBy)
 {
     QMutexLocker locker(&m_mutex);
 
@@ -348,9 +423,10 @@ void SessionDBManager::insertCommandOutput(const QString &sessionId,
     if (!command.isEmpty() && output.isEmpty()) {
         db.transaction();
         QSqlQuery ins(db);
-        ins.prepare("INSERT INTO history_v2 (command, cmd_id, status, stdout_text) VALUES (?, ?, 'pending', '')");
+        ins.prepare("INSERT INTO history_v2 (command, cmd_id, status, stdout_text, run_by) VALUES (?, ?, 'pending', '', ?)");
         ins.addBindValue(command);
         ins.addBindValue(cmdId.isEmpty() ? QVariant() : cmdId);
+        ins.addBindValue(runBy.isEmpty() ? QStringLiteral("unknown") : runBy);
         if (!ins.exec()) {
             qWarning() << "[DB] begin history_v2 failed:" << ins.lastError().text();
             db.rollback();
@@ -454,7 +530,8 @@ bool SessionDBManager::logToken(const QString &sessionId,
                                  const QString &tenantId,
                                  const QString &resource,
                                  const QString &scope,
-                                 int expiresIn)
+                                 int expiresIn,
+                                 const QString &capturedBy)
 {
     QMutexLocker locker(&m_mutex);
     if (!initMainDB()) {
@@ -465,8 +542,8 @@ bool SessionDBManager::logToken(const QString &sessionId,
     QSqlQuery q(m_mainDb);
     q.prepare(
         "INSERT INTO tokens (session_id, source, user, tenant_id, resource, "
-        "access_token, refresh_token, id_token, scope, expires_in) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "access_token, refresh_token, id_token, scope, expires_in, captured_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     );
     q.addBindValue(sessionId);
     q.addBindValue(source);
@@ -478,6 +555,7 @@ bool SessionDBManager::logToken(const QString &sessionId,
     q.addBindValue(idToken);
     q.addBindValue(scope);
     q.addBindValue(expiresIn > 0 ? expiresIn : QVariant());
+    q.addBindValue(capturedBy.isEmpty() ? QStringLiteral("unknown") : capturedBy);
 
     if (!q.exec()) {
         qWarning() << "[DB] logToken failed:" << q.lastError().text();
@@ -499,7 +577,7 @@ QJsonArray SessionDBManager::getTokensBySession(const QString &sessionId)
     QSqlQuery q(m_mainDb);
     q.prepare(
         "SELECT id, session_id, timestamp, source, user, tenant_id, resource, "
-        "access_token, refresh_token, id_token, token_type, expires_in, scope "
+        "access_token, refresh_token, id_token, token_type, expires_in, scope, captured_by "
         "FROM tokens WHERE session_id = ? ORDER BY timestamp DESC"
     );
     q.addBindValue(sessionId);
@@ -524,6 +602,7 @@ QJsonArray SessionDBManager::getTokensBySession(const QString &sessionId)
         obj["token_type"] = q.value(10).toString();
         obj["expires_in"] = q.value(11).toInt();
         obj["scope"] = q.value(12).toString();
+        obj["captured_by"] = q.value(13).toString();
         result.append(obj);
     }
 
@@ -541,7 +620,7 @@ QJsonArray SessionDBManager::getAllTokens()
     QSqlQuery q(m_mainDb);
     if (!q.exec(
         "SELECT id, session_id, timestamp, source, user, tenant_id, resource, "
-        "access_token, refresh_token, id_token, token_type, expires_in, scope "
+        "access_token, refresh_token, id_token, token_type, expires_in, scope, captured_by "
         "FROM tokens ORDER BY timestamp DESC"
     )) {
         qWarning() << "[DB] getAllTokens failed:" << q.lastError().text();
@@ -563,6 +642,7 @@ QJsonArray SessionDBManager::getAllTokens()
         obj["token_type"] = q.value(10).toString();
         obj["expires_in"] = q.value(11).toInt();
         obj["scope"] = q.value(12).toString();
+        obj["captured_by"] = q.value(13).toString();
         result.append(obj);
     }
 
@@ -594,6 +674,7 @@ bool SessionDBManager::deleteToken(qint64 tokenId)
 
 bool SessionDBManager::setSessionAlive(const QString &sessionId, bool alive)
 {
+    QMutexLocker locker(&m_mutex);
     if (!initMainDB()) return false;
 
     QSqlQuery q(m_mainDb);
@@ -610,6 +691,7 @@ bool SessionDBManager::setSessionAlive(const QString &sessionId, bool alive)
 
 bool SessionDBManager::setSessionStatus(const QString &sessionId, const QString &status)
 {
+    QMutexLocker locker(&m_mutex);
     if (!initMainDB()) return false;
 
     QSqlQuery q(m_mainDb);
@@ -645,7 +727,7 @@ QJsonArray SessionDBManager::listSessions()
     if (!initMainDB()) return arr;
 
     QSqlQuery q(m_mainDb);
-    if (!q.exec("SELECT SessionID, User, TenantID, DefaultDomain, Resource, Status, Alive, CreatedAt, LastSeen "
+    if (!q.exec("SELECT SessionID, User, TenantID, DefaultDomain, Resource, Status, Alive, CreatedAt, LastSeen, CreatedBy "
                 "FROM sessions ORDER BY LastSeen DESC NULLS LAST, CreatedAt DESC")) {
         qWarning() << "[DB] listSessions failed:" << q.lastError().text();
         return arr;
@@ -662,6 +744,7 @@ QJsonArray SessionDBManager::listSessions()
         row.insert("alive",     q.value(6).toInt() == 1);
         row.insert("createdAt", q.value(7).toString());
         row.insert("lastSeen",  q.value(8).toString());
+        row.insert("createdBy", q.value(9).toString());
         arr.append(row);
     }
     return arr;
@@ -738,7 +821,7 @@ QJsonArray SessionDBManager::getCommandHistory(const QString &sessionId)
             // Try history_v2 first (newer format) - exclude large stdout/stderr for performance
             // Only include first 500 chars of output for report summary
             if (q.exec("SELECT id, timestamp, command, status, exit_code, "
-                       "SUBSTR(stdout_text, 1, 500), SUBSTR(stderr_text, 1, 500), duration_ms "
+                       "SUBSTR(stdout_text, 1, 500), SUBSTR(stderr_text, 1, 500), duration_ms, run_by "
                        "FROM history_v2 ORDER BY timestamp ASC LIMIT 1000")) {
                 while (q.next()) {
                     QJsonObject cmd;
@@ -755,6 +838,7 @@ QJsonArray SessionDBManager::getCommandHistory(const QString &sessionId)
                     cmd.insert("stdout", stdout_text);
                     cmd.insert("stderr", stderr_text);
                     cmd.insert("duration_ms", q.value(7).toLongLong());
+                    cmd.insert("run_by", q.value(8).toString());
                     commands.append(cmd);
                 }
             } else {
@@ -827,6 +911,19 @@ QJsonObject SessionDBManager::getReportData(const QDateTime &startDate, const QD
     QJsonArray tenantsArray;
     for (const QString &t : uniqueTenants) tenantsArray.append(t);
     report.insert("unique_tenants", tenantsArray);
+
+    // Operators who took part (from session creators, token capturers, command runners).
+    QSet<QString> operators;
+    auto noteOp = [&operators](const QString &op) {
+        if (!op.isEmpty() && op != QLatin1String("legacy") && op != QLatin1String("unknown"))
+            operators.insert(op);
+    };
+    for (const QJsonValue &v : sessions) noteOp(v.toObject().value("createdBy").toString());
+    for (const QJsonValue &v : tokens)   noteOp(v.toObject().value("captured_by").toString());
+    for (const QJsonValue &v : commands) noteOp(v.toObject().value("run_by").toString());
+    QJsonArray opsArray;
+    for (const QString &o : operators) opsArray.append(o);
+    report.insert("operators", opsArray);
 
     // Categorize techniques based on token sources
     QJsonObject techniques;

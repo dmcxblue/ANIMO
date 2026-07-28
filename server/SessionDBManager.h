@@ -18,7 +18,8 @@ public:
                             const QString &user,
                             const QString &tenantId,
                             const QString &defaultDomain,
-                            const QString &resource);
+                            const QString &resource,
+                            const QString &createdBy = QStringLiteral("unknown"));
     bool updateSessionUser(const QString &sessionId, const QString &username);
     bool createSessionDB(const QString &sessionId);
     void updateSessionTenant(const QString &sessionId,
@@ -37,10 +38,16 @@ public:
                               const QDateTime &endDate = QDateTime());
     QJsonArray getCommandHistory(const QString &sessionId = QString());
 
+    // Operator activity audit log
+    bool logAudit(const QString &op, const QString &action,
+                  const QString &target = QString(), const QString &detail = QString());
+    QJsonArray getAuditLog(int limit = 500);
+
     void insertCommandOutput(const QString &sessionId,
                              const QString &command,
                              const QString &output,
-                             const QString &cmdId = QString());
+                             const QString &cmdId = QString(),
+                             const QString &runBy = QString());
 
     // Token logging methods
     bool logToken(const QString &sessionId,
@@ -52,7 +59,8 @@ public:
                   const QString &tenantId = QString(),
                   const QString &resource = QString(),
                   const QString &scope = QString(),
-                  int expiresIn = 0);
+                  int expiresIn = 0,
+                  const QString &capturedBy = QString());
 
     QJsonArray getTokensBySession(const QString &sessionId);
     QJsonArray getAllTokens();

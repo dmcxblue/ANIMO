@@ -8,7 +8,7 @@ set(SERVER_SRC
     main.cpp
     Server.cpp
     Server.h
-    ${CMAKE_SOURCE_DIR}/server/SessionDBManager.cpp   # <— add this
+    ${CMAKE_SOURCE_DIR}/server/SessionDBManager.cpp   # <- add this
     resources.qrc   # Qt resources (embedded PowerShell scripts)
 )
 

@@ -51,10 +51,27 @@ static QHash<QString, QString>           g_loginRid;      // sessionId -> rid (t
 static QHash<QString, QString>           g_pendingToken;  // sessionId -> access token (captured from PS before login OK)
 static QHash<QString, QString>           g_lastCommand;   // sessionId -> last command (for history)
 
-// Command execution state (simple queue with timeout)
+// Command execution state (one active command per session; the rest queued)
 static QHash<QString, QString>           g_activeCmdId;   // sessionId -> currently executing cmdId
 static QHash<QString, qint64>            g_cmdStartTime;  // sessionId -> when command started (ms since epoch)
 static constexpr qint64 CMD_TIMEOUT_MS = 30000;           // 30 second timeout for stale command detection
+
+struct QueuedCommand { QString cmdId; QString cmd; QString op; };
+static QHash<QString, QList<QueuedCommand>> g_cmdQueue;   // sessionId -> commands waiting to run
+static constexpr int MAX_CMD_QUEUE = 50;                  // bound the per-session queue
+
+// Pending token reinject waiting for the current command to finish. If the
+// client sends reinject_tokens while a command is running, we cannot write to
+// stdin (it would interleave with the command's output stream). Instead the
+// payload sits here and is flushed the moment the active command completes,
+// so the terminal's Az context always ends up refreshed.
+static QHash<QString, QByteArray> g_pendingReinject;      // sessionId -> full PS payload
+
+// Buffered pre-login (inAuth) stdout so late-opened terminal tabs can still
+// see login-time diagnostics (e.g. the SPN login script's subscription list).
+// Drained the first time get_session subscribes a socket to the session.
+static QHash<QString, QByteArray> g_earlyOutput;
+static constexpr int MAX_EARLY_OUTPUT = 64 * 1024;         // bound the buffer
 
 // Single-fire auth gating (prevents duplicate OK/FAIL handling)
 enum class AuthState { Pending, Success, Failed };
@@ -81,13 +98,72 @@ static QByteArray loadScript(const QString &resourcePath) {
     return file.readAll();
 }
 
-static inline void sendTo(QTcpSocket *sock, const QJsonObject &obj) {
-    if (sock && sock->state() == QAbstractSocket::ConnectedState)
-        sock->write(toBytes(obj));
+// Returns true if bytes were actually written to a ConnectedState socket.
+// Distinguishes "socket dead" from "socket buffer full" so callers can prune.
+static inline bool sendTo(QTcpSocket *sock, const QJsonObject &obj) {
+    if (!sock) return false;
+    if (sock->state() != QAbstractSocket::ConnectedState) return false;
+    const QByteArray bytes = toBytes(obj);
+    const qint64 wrote = sock->write(bytes);
+    if (wrote < 0) return false;
+    // Force the OS to see it now, not on next event-loop turn. Broadcasts
+    // are often followed by a mutex release + long computation, so buffered
+    // writes would sit in Qt's send buffer instead of hitting the socket.
+    sock->flush();
+    return true;
 }
 
+// Broadcast + prune. If a socket isn't ConnectedState or write() fails, it's
+// removed from the target session's subscriber set - otherwise a crashed
+// client's dangling socket pointer would silently swallow every subsequent
+// broadcast, making the caller think "N subscribers received it" when N-1 got
+// nothing. Caller must hold g_stateMutex (all existing callers do).
+static void broadcastToSession(const QString &sessionId, const QJsonObject &obj);
+
+// Fallback for callers that don't have a sessionId (e.g. session_exit hook
+// broadcasting to a saved local copy). No pruning possible here.
 static inline void broadcastTo(const QSet<QTcpSocket*> &socks, const QJsonObject &obj) {
     for (QTcpSocket *s : socks) sendTo(s, obj);
+}
+
+static void broadcastToSession(const QString &sessionId, const QJsonObject &obj) {
+    auto it = g_subscribers.find(sessionId);
+    if (it == g_subscribers.end()) return;
+    QSet<QTcpSocket*> &subs = it.value();
+    QSet<QTcpSocket*> dead;
+    // Iterate a snapshot so we can mutate `subs` (remove-during-iterate is UB).
+    const QList<QTcpSocket*> snapshot(subs.begin(), subs.end());
+    for (QTcpSocket *s : snapshot) {
+        if (!sendTo(s, obj)) dead.insert(s);
+    }
+    if (!dead.isEmpty()) {
+        for (QTcpSocket *s : dead) subs.remove(s);
+        qInfo().noquote() << QString("[Server] pruned %1 dead subscriber(s) from sid=%2")
+                                .arg(dead.size()).arg(sessionId.left(8));
+    }
+}
+
+// Write a wrapped command to the session's shell, mark it active, persist it, and
+// announce it to subscribers. Caller must hold g_stateMutex.
+static void dispatchCommand(const QString &sid, const QString &cmdId, const QString &cmd,
+                            const QString &op = QStringLiteral("unknown")) {
+    QProcess *proc = g_sessions.value(sid);
+    if (!proc) {
+        qWarning().noquote() << QString("[Server] dispatchCommand: no process for session %1 (cmd=%2)")
+                                    .arg(sid.left(8), cmd.left(60));
+        return;
+    }
+    g_activeCmdId[sid]  = cmdId;
+    g_cmdStartTime[sid] = QDateTime::currentMSecsSinceEpoch();
+
+    const QString wrapped = OutputSanitizer::wrapPwshCommandWithId(cmd, cmdId);
+    proc->write(wrapped.toUtf8());
+    proc->write("\n");
+
+    SessionDBManager::instance().insertCommandOutput(sid, cmd, QString(), cmdId, op);
+    broadcastToSession(sid,
+        QJsonObject{ {Protocol::F_ACTION, "command_started"},
+                     {"sessionId", sid}, {Protocol::F_CMD_ID, cmdId}, {"command", cmd} });
 }
 
 static QString resolveTenantIdBlocking(const QString &domain) {
@@ -146,10 +222,10 @@ static QString escapePsString(const QString &s) {
         if (ch == QLatin1Char('\'')) {
             escaped.append(QLatin1String("''"));
         } else if (ch == QLatin1Char('\0')) {
-            // Strip null bytes — could terminate strings in edge cases
+            // Strip null bytes - could terminate strings in edge cases
             continue;
         } else if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r')) {
-            // Strip newlines — could break out of single-line PS context
+            // Strip newlines - could break out of single-line PS context
             continue;
         } else {
             escaped.append(ch);
@@ -167,7 +243,8 @@ static QString escapePsString(const QString &s) {
 // Ensure a PowerShell process exists for this session; start and wire output
 // Now uses SessionDBManager for all DB I/O (main + per-session history)
 // ===========================================================================
-static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
+static QProcess* ensureProcess(QObject *parent, const QString &sessionId,
+                               const QString &createdBy = QStringLiteral("unknown")) {
     QMutexLocker locker(&g_stateMutex);
     if (g_sessions.contains(sessionId)) return g_sessions.value(sessionId);
 
@@ -181,6 +258,15 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
     env.insert("TERM", "dumb");  // Force dumb terminal - no escape sequences
     env.insert("NO_COLOR", "1"); // Disable color output
     env.insert("POWERSHELL_TELEMETRY_OPTOUT", "1");
+
+    // Per-session Az context isolation. Without this, every session shares
+    // ~/.Azure/AzureRmContext.json and stale AccessToken contexts poison each
+    // other's default context (breaks token minting non-deterministically).
+    const QString azConfigDir = QString("%1/data/sessions/%2/.azure")
+        .arg(QCoreApplication::applicationDirPath(), sessionId);
+    QDir().mkpath(azConfigDir);
+    env.insert("AZURE_CONFIG_DIR", azConfigDir);
+
     proc->setProcessEnvironment(env);
 
     // Common args
@@ -217,12 +303,15 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
         meta.value("user").toString("Unknown"),
         meta.value("tenantId").toString("N/A"),
         meta.value("domain").toString("N/A"),
-        meta.value("resource").toString("https://management.azure.com")
+        meta.value("resource").toString("https://management.azure.com"),
+        createdBy
     );
     SessionDBManager::instance().createSessionDB(sessionId);
+    // Reflect live-process state so the sessions table isn't stuck on Alive=0.
+    SessionDBManager::instance().setSessionAlive(sessionId, true);
 
     // Tell subscribers the shell is alive
-    broadcastTo(g_subscribers.value(sessionId),
+    broadcastToSession(sessionId,
         QJsonObject{ {Protocol::F_ACTION, "session_open"},
                      {"sessionId", sessionId},
                      {"alive", true} });
@@ -231,6 +320,9 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
     proc->write("$null=$ErrorActionPreference=$ProgressPreference=$WarningPreference='SilentlyContinue'\n");
     proc->write("$null=Remove-Module PSReadLine -Force -EA SilentlyContinue\n");
     proc->write("function global:prompt{''}\n");
+    // Force TLS 1.2+ for Invoke-RestMethod/WebRequest so calls to Azure/M365 endpoints
+    // don't fail TLS negotiation on hosts that still default to older protocols.
+    proc->write("try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13}catch{try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12}catch{}}\n");
 
     // STDOUT hook: segment & sanitize AFTER login; raw during auth (so device code text shows)
     QObject::connect(proc, &QProcess::readyReadStandardOutput, parent, [proc, sessionId]() {
@@ -255,167 +347,198 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
         // During login, pass-through raw so user sees device-code instructions etc.
         const bool inAuth = (g_authState.value(sessionId, AuthState::Pending) == AuthState::Pending);
         if (inAuth) {
-            broadcastTo(g_subscribers.value(sessionId),
-                QJsonObject{ {Protocol::F_ACTION, "output"},
-                             {"sessionId", sessionId},
-                             {"stream", "stdout"},
-                             {"data", QString::fromUtf8(chunk)} });
+            // Denylist-then-allowlist filter for pre-login pwsh output.
+            //
+            // Denylist fails because pwsh's stdin echo arrives split across TCP
+            // chunks in arbitrary places ("nu" | "ll=$ErrorAction..."). A line
+            // filter can't catch fragments.
+            //
+            // So instead: only forward chunks whose text CONTAINS something we
+            // know an operator actually needs to see during login. Everything
+            // else during inAuth is dropped. Post-login output isn't affected
+            // (this whole block only runs while authState == Pending).
+            //
+            // Whitelist covers:
+            //   - Device-code login (URL + code)
+            //   - [Animo] diagnostic lines (SPN sub list, WARNING, etc.)
+            //   - Login failure text
+            //   - MFA prompts
+            static const QList<QByteArray> keepSubstrings = {
+                "microsoft.com/devicelogin",   // device code URL
+                "https://microsoft.com/",      // any MSFT login URL
+                "enter the code",              // device code instruction
+                "[Animo]",                     // our SPN login-script diagnostics
+                "__ANIMO_MFA_REQUIRED__",      // MFA marker (also parsed by scanner)
+                "WARNING",                     // any Az/PS warning worth surfacing
+                "ERROR",                       // any Az/PS error
+                "authentication failed",       // MSAL fail
+                "invalid_",                    // invalid_client, invalid_grant, etc.
+            };
+            auto looksInteresting = [&](const QByteArray &data) -> bool {
+                for (const QByteArray &s : keepSubstrings) {
+                    if (data.contains(s)) return true;
+                }
+                return false;
+            };
+
+            if (looksInteresting(chunk)) {
+                broadcastToSession(sessionId,
+                    QJsonObject{ {Protocol::F_ACTION, "output"},
+                                 {"sessionId", sessionId},
+                                 {"stream", "stdout"},
+                                 {"data", QString::fromUtf8(chunk)} });
+                QByteArray &early = g_earlyOutput[sessionId];
+                if (early.size() < MAX_EARLY_OUTPUT) {
+                    const int room = MAX_EARLY_OUTPUT - early.size();
+                    early.append(chunk.left(room));
+                }
+            }
             emittedAny = true;  // Prevent duplicate broadcast later
         }
 
-        // Extract zero or more complete __QZ_BEGIN__/__QZ_END__ segments (with optional :cmdId)
-        // Also handle __QZ_ERROR_BEGIN__/__QZ_ERROR_END__ for error stream separation
+        // Extract complete segments:
+        //   __QZ_BEGIN__:<id>  <output>  [__QZ_ERR__:<id> <err>]  __QZ_EXIT__:<id>:<fail>:<code>  __QZ_END__:<id>
+        // Markers are matched ONLY at line boundaries and END is paired to its BEGIN by
+        // cmdId, so output that merely contains marker-looking text cannot break framing,
+        // and a command that never closed (no END) cannot merge into the next command.
         static const QByteArray B = "__QZ_BEGIN__";
         static const QByteArray E = "__QZ_END__";
-        static const QByteArray EB = "__QZ_ERROR_BEGIN__";
-        static const QByteArray EE = "__QZ_ERROR_END__";
-        bool commandCompleted = false;
-        QString completedCmdId;
 
-        // First, extract and process any error segments
-        while (true) {
-            int eb = buf.indexOf(EB);
-            if (eb < 0) break;
-
-            // Find the end of the ERROR_BEGIN line to extract cmdId
-            int errorBeginLineEnd = buf.indexOf('\n', eb);
-            if (errorBeginLineEnd < 0) break;
-
-            // Extract cmdId from ERROR_BEGIN marker
-            QString errorCmdId;
-            QByteArray errorBeginLine = buf.mid(eb, errorBeginLineEnd - eb);
-            int colonPos = errorBeginLine.indexOf(':');
-            if (colonPos > 0) {
-                errorCmdId = QString::fromUtf8(errorBeginLine.mid(colonPos + 1)).trimmed();
+        auto atLineStart = [&buf](int p) { return p == 0 || (p > 0 && buf.at(p - 1) == '\n'); };
+        auto findMarkerLine = [&buf, &atLineStart](const QByteArray &m, int from) {
+            int p = from;
+            while ((p = buf.indexOf(m, p)) >= 0) {
+                if (atLineStart(p)) return p;
+                p += 1;
             }
+            return -1;
+        };
 
-            int ee = buf.indexOf(EE, errorBeginLineEnd);
-            if (ee < 0) break;
-
-            // Extract error content
-            int errorStart = errorBeginLineEnd + 1;
-            int errorEnd = ee;
-            QByteArray errorSegment = buf.mid(errorStart, errorEnd - errorStart);
-
-            // Remove the error segment from buffer
-            int eeLineEnd = buf.indexOf('\n', ee);
-            int removeEnd = (eeLineEnd >= 0) ? eeLineEnd + 1 : ee + EE.size() + errorCmdId.size() + 1;
-            buf.remove(0, removeEnd);
-
-            // Sanitize error output
-            QString errorCleaned = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(errorSegment));
-            errorCleaned = errorCleaned.trimmed();
-
-            if (!errorCleaned.isEmpty() && !inAuth) {
-                QJsonObject errMsg{
-                    {Protocol::F_ACTION, "output"},
-                    {"sessionId", sessionId},
-                    {"stream", "stderr"},
-                    {"data", errorCleaned}
-                };
-                if (!errorCmdId.isEmpty()) {
-                    errMsg.insert(Protocol::F_CMD_ID, errorCmdId);
-                }
-                broadcastTo(g_subscribers.value(sessionId), errMsg);
-            }
-        }
-
-        // Now process normal output segments
         while (true) {
-            int b = buf.indexOf(B);
+            int b = findMarkerLine(B, 0);
             if (b < 0) break;
 
-            // Find the end of the BEGIN line to extract cmdId
             int beginLineEnd = buf.indexOf('\n', b);
-            if (beginLineEnd < 0) break;
+            if (beginLineEnd < 0) break;  // BEGIN line not fully arrived yet
 
-            // Extract cmdId from BEGIN marker (format: __QZ_BEGIN__:cmdId or __QZ_BEGIN__)
-            QString beginCmdId;
+            // cmdId from the BEGIN marker (format: __QZ_BEGIN__:<id>)
             QByteArray beginLine = buf.mid(b, beginLineEnd - b);
+            QString beginCmdId;
             int colonPos = beginLine.indexOf(':');
-            if (colonPos > 0) {
-                beginCmdId = QString::fromUtf8(beginLine.mid(colonPos + 1)).trimmed();
+            if (colonPos > 0) beginCmdId = QString::fromUtf8(beginLine.mid(colonPos + 1)).trimmed();
+
+            // The matching END carries the same cmdId.
+            const QByteArray endMarker = beginCmdId.isEmpty()
+                ? E : (E + ":" + beginCmdId.toUtf8());
+            int e = findMarkerLine(endMarker, beginLineEnd);
+            if (e < 0) {
+                // No matching END yet. If a newer BEGIN has already arrived, this segment
+                // is orphaned (its command never closed) - drop it so it can't merge forward.
+                int nextBegin = findMarkerLine(B, beginLineEnd);
+                if (nextBegin >= 0) { buf.remove(0, nextBegin); continue; }
+                break;  // otherwise wait for the rest of this command's output
             }
 
-            int e = buf.indexOf(E, beginLineEnd);
-            if (e < 0) break;
+            QByteArray segment = buf.mid(beginLineEnd + 1, e - (beginLineEnd + 1));
 
-            // Segment boundaries: content is between the BEGIN line's newline and the END marker
-            int segStart = beginLineEnd + 1;
-            int segEnd = e;
-
-            // Extract cmdId from END marker for validation
+            // Consume through the END line.
             int endLineEnd = buf.indexOf('\n', e);
-            QByteArray endLine = (endLineEnd >= 0) ? buf.mid(e, endLineEnd - e) : buf.mid(e);
-            QString endCmdId;
-            int endColonPos = endLine.indexOf(':');
-            if (endColonPos > 0) {
-                endCmdId = QString::fromUtf8(endLine.mid(endColonPos + 1)).trimmed();
+            buf.remove(0, (endLineEnd >= 0) ? endLineEnd + 1 : buf.size());
+
+            const QString cmdId = beginCmdId;
+
+            // Pull exit status / failure flag from the segment (format __QZ_EXIT__:<id>:<fail>:<code>).
+            bool failed = false;
+            int exitCode = 0;
+            int ei = segment.indexOf("__QZ_EXIT__:");
+            if (ei >= 0) {
+                int le = segment.indexOf('\n', ei);
+                const QByteArray exitLine = (le >= 0 ? segment.mid(ei, le - ei) : segment.mid(ei)).trimmed();
+                const QList<QByteArray> parts = exitLine.split(':');
+                if (parts.size() >= 4) {
+                    failed   = (parts.at(parts.size() - 2).trimmed() == "1");
+                    exitCode = parts.at(parts.size() - 1).trimmed().toInt();
+                }
             }
+            if (segment.contains("__QZ_ERR__")) failed = true;
 
-            // Use the cmdId from either marker (prefer END marker if present)
-            QString cmdId = !endCmdId.isEmpty() ? endCmdId : beginCmdId;
-
-            QByteArray segment = buf.mid(segStart, segEnd - segStart);
-
-            // Remove everything up through the end marker line from the buffer
-            int removeEnd = (endLineEnd >= 0) ? endLineEnd + 1 : e + E.size() + endCmdId.size() + 1;
-            buf.remove(0, removeEnd);
-
-            // Sanitize
+            // Sanitize and strip every QZ marker line from the visible output.
             QString cleaned = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(segment));
-            // Remove any embedded markers with or without cmdId (including error markers)
-            static QRegularExpression markerRe(R"(__QZ_(BEGIN|END|ERROR_BEGIN|ERROR_END)__(:[^\s\n]*)?)");
+            static QRegularExpression markerRe(R"(__QZ_(BEGIN|END|EXIT|ERR)__(:[^\n]*)?)");
             cleaned.remove(markerRe);
             cleaned = cleaned.trimmed();
-            // We found a complete BEGIN/END segment - command output is done
-            commandCompleted = true;
-            if (!cmdId.isEmpty()) {
-                completedCmdId = cmdId;
-            }
 
-            if (cleaned.isEmpty()) {
-                continue;
-            }
+            // A non-empty cmdId means the segment came from wrapPwshCommandWithId
+            // (i.e. a real operator command), which by construction only happens
+            // AFTER the login script has finished. Don't let a lingering
+            // inAuth==true gate silently drop that output - broadcast it either way.
+            // Pre-login raw broadcasts (line 302) are the ONLY case that legitimately
+            // should stay off the segment path, and those never have a cmdId.
+            const bool haveCmdId = !cmdId.isEmpty();
+            const bool shouldBroadcast = !cleaned.isEmpty() && (haveCmdId || !inAuth);
 
-            // Emit cleaned only when not in auth phase
-            if (!inAuth) {
+            if (shouldBroadcast) {
                 QJsonObject outMsg{
                     {Protocol::F_ACTION, "output"},
                     {"sessionId", sessionId},
                     {"stream", "stdout"},
                     {"data", cleaned}
                 };
-                if (!cmdId.isEmpty()) {
-                    outMsg.insert(Protocol::F_CMD_ID, cmdId);
-                }
-                broadcastTo(g_subscribers.value(sessionId), outMsg);
+                if (haveCmdId) outMsg.insert(Protocol::F_CMD_ID, cmdId);
+                broadcastToSession(sessionId, outMsg);
             }
 
-            // History
             SessionDBManager::instance().insertCommandOutput(sessionId, QString(), cleaned, cmdId);
-        }
 
-        // When any output segment completes (END marker found), clear active state
-        if (commandCompleted) {
-            // Get cmdId before clearing
-            QString finalCmdId = completedCmdId.isEmpty() ? g_activeCmdId.value(sessionId) : completedCmdId;
+            // Emit command_complete for THIS segment immediately, paired with its own
+            // output and cmdId. Include the same cleaned output in a fallback field
+            // so the client can render it even if the live output message got lost.
+            // Same gate as broadcast: real commands (haveCmdId) always fire.
+            if (haveCmdId || !inAuth) {
+                const QString finalCmdId = cmdId.isEmpty() ? g_activeCmdId.value(sessionId) : cmdId;
+                g_activeCmdId.remove(sessionId);
+                g_cmdStartTime.remove(sessionId);
 
-            // Always clear - we execute sequentially so this must be our command
-            g_activeCmdId.remove(sessionId);
-            g_cmdStartTime.remove(sessionId);
-
-            broadcastTo(g_subscribers.value(sessionId),
-                QJsonObject{
+                QJsonObject completeMsg{
                     {Protocol::F_ACTION, "command_complete"},
                     {"sessionId", sessionId},
-                    {Protocol::F_CMD_ID, finalCmdId}
-                });
+                    {Protocol::F_CMD_ID, finalCmdId},
+                    {"ok", !failed},
+                    {"exitCode", exitCode},
+                    // Belt-and-suspenders: send the DB-captured stdout with the
+                    // completion frame. Client uses it if its outputLines buffer
+                    // is empty (i.e. the live output message got lost).
+                    {"stdoutFallback", cleaned}
+                };
+                broadcastToSession(sessionId, completeMsg);
+
+                // Flush any pending token reinject that arrived while this
+                // command was running. Doing it here keeps the Az context
+                // renewed even for sessions that are almost always busy.
+                // NOTE: we're ALREADY inside g_stateMutex (locked at the top of
+                // this lambda). QMutex is non-recursive, so a nested QMutexLocker
+                // here would deadlock the whole main thread and every future
+                // run_command would silently block. Access maps directly instead.
+                {
+                    QByteArray pending = g_pendingReinject.take(sessionId);
+                    if (!pending.isEmpty()) {
+                        if (QProcess *p = g_sessions.value(sessionId, nullptr))
+                            p->write(pending);
+                    }
+                }
+
+                // Dispatch the next queued command for this session, if any.
+                if (!g_cmdQueue.value(sessionId).isEmpty()) {
+                    const QueuedCommand next = g_cmdQueue[sessionId].takeFirst();
+                    if (g_cmdQueue[sessionId].isEmpty()) g_cmdQueue.remove(sessionId);
+                    dispatchCommand(sessionId, next.cmdId, next.cmd, next.op);
+                }
+            }
         }
 		
 		// ==== Only if we're still in auth AND we didn't emit a cleaned segment, pass raw ====
 		if (inAuth && !emittedAny) {
-			broadcastTo(g_subscribers.value(sessionId),
+			broadcastToSession(sessionId,
 				QJsonObject{ {Protocol::F_ACTION, "output"},
 							{"sessionId", sessionId},
 							{"stream", "stdout"},
@@ -473,7 +596,7 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                     {"mfaMessage", mfaMsg}
                 };
                 if (g_loginRid.contains(sessionId)) ev.insert("rid", g_loginRid.value(sessionId));
-                broadcastTo(g_subscribers.value(sessionId), ev);
+                broadcastToSession(sessionId, ev);
 
                 // Consume the MFA marker line
                 if (nl >= 0) buf.remove(mfaIdx, nl - mfaIdx + 1);
@@ -509,12 +632,23 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                     upn = upn.mid(1, upn.size() - 2).trimmed();
                 }
 
-                const QString domain  = upn.contains('@') ? upn.section('@', 1, 1) : QStringLiteral("N/A");
-                // Skip blocking tenant resolution for now - use domain as tenant placeholder
-                const QString tenant  = domain;
+                const QString derivedDomain = upn.contains('@')
+                                                  ? upn.section('@', 1, 1)
+                                                  : QStringLiteral("N/A");
 
-                // enrich + persist success
+                // enrich + persist success. If the mode-specific branch already
+                // stashed real tenant/domain metadata (e.g. SPN mode stores the
+                // tenant GUID from the login request), keep it - the UPN-derived
+                // fallback only fills in when we still have "N/A".
                 QJsonObject meta = g_sessionInfo.value(sessionId);
+                const QString existingTenant = meta.value("tenantId").toString();
+                const QString existingDomain = meta.value("domain").toString();
+                const auto isPlaceholder = [](const QString &v) {
+                    return v.isEmpty() || v == QStringLiteral("N/A");
+                };
+                const QString tenant = isPlaceholder(existingTenant) ? derivedDomain : existingTenant;
+                const QString domain = isPlaceholder(existingDomain) ? derivedDomain : existingDomain;
+
                 meta.insert("user",     upn.isEmpty() ? QStringLiteral("Unknown") : upn);
                 meta.insert("domain",   domain);
                 meta.insert("tenantId", tenant);
@@ -534,15 +668,22 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                 };
                 if (g_loginRid.contains(sessionId)) ev.insert("rid", g_loginRid.take(sessionId));
                 if (g_pendingToken.contains(sessionId)) ev.insert("accessToken", g_pendingToken.take(sessionId));
+                // Forward storage token acquired via refresh exchange (MSAL sessions)
+                const QString stToken = meta.value("storageToken").toString();
+                if (!stToken.isEmpty()) ev.insert("storageToken", stToken);
 
-                const auto subs = g_subscribers.value(sessionId);
                 qInfo() << "[Server] ✓ Session created:" << sessionId << "| User:" << upn << "| Method: Credentials";
-                broadcastTo(subs, ev);
+                broadcastToSession(sessionId, ev);
 
                 // consume matched line and lock state
                 if (nl >= 0) buf.remove(0, nl + 1);
                 else buf.clear();
                 g_authState[sessionId] = AuthState::Success;
+                SessionDBManager::instance().setSessionStatus(sessionId, QStringLiteral("success"));
+                // The early-output buffer is only useful for tabs opened during
+                // the auth window. After we've transitioned to Success, the
+                // buffer will never be replayed - drop it so it can't linger.
+                g_earlyOutput.remove(sessionId);
 
             } else if (hasFail && (!hasOk || failIdx < okIdx)) {
                 // failure - extract error message if present
@@ -562,11 +703,12 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                 QJsonObject ev{ {Protocol::F_ACTION, "error"},
                                 {"message", errorMsg} };
                 if (g_loginRid.contains(sessionId)) ev.insert("rid", g_loginRid.take(sessionId));
-                broadcastTo(g_subscribers.value(sessionId), ev);
+                broadcastToSession(sessionId, ev);
 
                 const int nl = buf.indexOf('\n', failIdx);
                 if (nl >= 0) buf.remove(0, nl + 1); else buf.clear();
                 g_authState[sessionId] = AuthState::Failed;
+                SessionDBManager::instance().setSessionStatus(sessionId, QStringLiteral("failed"));
             }
         }
     });
@@ -579,7 +721,7 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
         QString cleaned = OutputSanitizer::stripAnsiPrompt(QString::fromUtf8(chunk));
         {
             QMutexLocker locker(&g_stateMutex);
-            broadcastTo(g_subscribers.value(sessionId),
+            broadcastToSession(sessionId,
                 QJsonObject{ {Protocol::F_ACTION, "output"},
                              {"sessionId", sessionId},
                              {"stream", "stderr"},
@@ -603,13 +745,19 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId) {
                          {"sessionId", sessionId},
                          {"exitCode", exitCode},
                          {"crashed", exitStatus == QProcess::CrashExit} };
-        broadcastTo(g_subscribers.value(sessionId), msg);
+        broadcastToSession(sessionId, msg);
 
-        // Clean up subscribers — session is dead, no further messages will come
+        // Reflect dead-process state in the DB so a table refresh doesn't lie.
+        SessionDBManager::instance().setSessionAlive(sessionId, false);
+
+        // Clean up subscribers - session is dead, no further messages will come
         g_subscribers.remove(sessionId);
         g_activeCmdId.remove(sessionId);
         g_cmdStartTime.remove(sessionId);
         g_stdoutBuf.remove(sessionId);
+        g_cmdQueue.remove(sessionId);
+        g_pendingReinject.remove(sessionId);
+        g_earlyOutput.remove(sessionId);
 
         if (exitStatus == QProcess::CrashExit) {
             qWarning() << "[Server] PowerShell process crashed for session:" << sessionId;
@@ -683,8 +831,10 @@ void Server::onClientDisconnected() {
     }
     clients_.remove(s);
     authed_.remove(s);
+    const QString op = operatorBySocket_.take(s);
     s->deleteLater();
-    emit log("[*] Client disconnected");
+    emit log(op.isEmpty() ? QStringLiteral("[*] Client disconnected")
+                          : QString("[*] Operator '%1' disconnected").arg(op));
 }
 
 bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
@@ -726,6 +876,9 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
+        SessionDBManager::instance().logAudit(
+            operatorBySocket_.value(sock, QStringLiteral("unknown")), "new_session", sid, mode);
+
         // Enforce session count limit
         {
             QMutexLocker locker(&g_stateMutex);
@@ -737,7 +890,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         }
 
         // Ensure process and subscribe caller
-        QProcess *proc = ensureProcess(this, sid);
+        QProcess *proc = ensureProcess(this, sid, operatorBySocket_.value(sock, QStringLiteral("unknown")));
         if (!proc) {
             sendTo(sock, Protocol::err("failed to start session process"));
             return true;
@@ -784,7 +937,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 return true;
             }
 
-            // GRAPH — Connect-MgGraph (no module checks, emit markers)
+            // GRAPH - Connect-MgGraph (no module checks, emit markers)
             if (resource.contains("graph.microsoft.com", Qt::CaseInsensitive)) {
                 // Load script from Qt resources
                 QByteArray script = loadScript(":/scripts/login_graph.ps1");
@@ -821,7 +974,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 return true;
             }
 
-            // AZURE MANAGEMENT (Az) — Connect-AzAccount (no module checks)
+            // AZURE MANAGEMENT (Az) - Connect-AzAccount (no module checks)
             // Load script from Qt resources
             QByteArray script = loadScript(":/scripts/login_azure.ps1");
             if (script.isEmpty()) {
@@ -857,7 +1010,45 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
-        // ——— SPN (Service Principal) FLOW ———
+        // --- FULL SESSION via DEVICE CODE (Connect-AzAccount -UseDeviceAuthentication) ---
+        // Interactive device-code login run INSIDE Az, so the context keeps a real token
+        // cache + refresh token. Data-plane cmdlets (Get-AzKeyVaultSecret, storage, etc.)
+        // then work natively - unlike -AccessToken sessions. No username/password needed.
+        if (mode == QStringLiteral("az_devicecode")) {
+            QByteArray script = loadScript(":/scripts/login_azure_devicecode.ps1");
+            if (script.isEmpty()) {
+                sendTo(sock, Protocol::err("failed to load device-code login script"));
+                return true;
+            }
+
+            QString appDir = QCoreApplication::applicationDirPath();
+            QDir().mkpath(QString("%1/data/sessions/%2").arg(appDir, sid));
+            const QString ps1Path = QString("%1/data/sessions/%2/login.ps1").arg(appDir, sid);
+
+            QFile f(ps1Path);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                sendTo(sock, Protocol::err("failed to create login script"));
+                return true;
+            }
+            f.write(script);
+            f.close();
+
+            if (!rid.isEmpty()) {
+                QMutexLocker locker(&g_stateMutex);
+                g_loginRid.insert(sid, rid);
+            }
+
+            // No credentials to pass - the device-code prompt streams to the Session Tab.
+            QString execCmd = QString(". \"%1\"\n").arg(ps1Path);
+            proc->write(execCmd.toUtf8());
+
+            QJsonObject ack = Protocol::ok("new_session ok");
+            ack.insert("sessionId", sid);
+            sendTo(sock, ack);
+            return true;
+        }
+
+        // --- SPN (Service Principal) FLOW ---
         if (mode == QStringLiteral("spn")) {
             const QString appId        = obj.value("appId").toString().trimmed();
             const QString clientSecret = obj.value("clientSecret").toString();
@@ -905,6 +1096,23 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 g_loginRid.insert(sid, rid);
             }
 
+            // Stash SPN identity in g_sessionInfo BEFORE the login script runs.
+            // The __ANIMO_LOGIN_OK__ handler is generic and would otherwise
+            // derive tenant/domain from the UPN's @suffix - which for SPNs is
+            // just the AppId with no '@' - giving "N/A". Preserving these here
+            // means the sessions table shows the real tenant GUID.
+            {
+                QMutexLocker locker(&g_stateMutex);
+                QJsonObject spnMeta = g_sessionInfo.value(sid);
+                spnMeta.insert("user",     appId);
+                spnMeta.insert("tenantId", tenantId);
+                spnMeta.insert("domain",   QStringLiteral("ServicePrincipal"));
+                spnMeta.insert("resource", QStringLiteral("https://management.azure.com"));
+                g_sessionInfo.insert(sid, spnMeta);
+            }
+            SessionDBManager::instance().updateSessionUser(sid, appId);
+            SessionDBManager::instance().updateSessionTenant(sid, tenantId, QStringLiteral("ServicePrincipal"));
+
             // Pass only the credential file path, not the secret itself
             QString execCmd = QString(". \"%1\" -CredentialFile \"%2\"\n")
                 .arg(ps1Path, credPath);
@@ -924,7 +1132,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
-        // ——— TOKENS FLOW ———
+        // --- TOKENS FLOW ---
         if (mode == QStringLiteral("tokens")) {
             const QString access = obj.value("accessToken").toString();
             const QString refresh= obj.value("refreshToken").toString();
@@ -977,7 +1185,8 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 meta2.value("user").toString("Unknown"),
                 meta2.value("tenantId").toString("N/A"),
                 meta2.value("domain").toString("N/A"),
-                resource);
+                resource,
+                operatorBySocket_.value(sock, QStringLiteral("unknown")));
 
             // Prepare a PS fragment that will emit markers understood by stdout hook
             auto emitOk = [&](const QString &upn)->QByteArray {
@@ -1004,12 +1213,26 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 ps.append(emitOk(user)); ps.append("return}catch{$e=$_.Exception.Message}\n");
                 ps.append(emitFailWithMsg("e"));
             } else {
-                // —— Az: need both Az access and a Graph token for Connect-AzAccount
+                // -- Az: need both Az access and a Graph token for Connect-AzAccount
                 if (refresh.isEmpty()) {
-                    qWarning() << "[Server] Az login failed: no refresh token";
-                    sendTo(sock, Protocol::err("refreshToken required for Az token login"));
-                    return true;
-                }
+                    // Access-token-only session (no refresh token, e.g. an SPN access
+                    // token). We cannot mint other audiences - use the single token as-is.
+                    if (resource.contains("management.azure.com", Qt::CaseInsensitive)) {
+                        // Inert ARM context so Az cmdlets work with this token.
+                        ps.append("$a=@\"\n"); ps.append(access.toUtf8()); ps.append("\n\"@\n");
+                        ps.append("try{Connect-AzAccount -AccessToken $a ");
+                        if (!user.isEmpty())     ps.append(QString("-AccountId '%1' ").arg(escapePsString(user)).toUtf8());
+                        if (!tenantId.isEmpty()) ps.append(QString("-TenantId '%1' ").arg(escapePsString(tenantId)).toUtf8());
+                        ps.append("-WA Ignore|Out-Null}catch{}\n");
+                        ps.append("$ctx=Get-AzContext -EA SilentlyContinue\n");
+                        ps.append("if($ctx-and$ctx.Account){"); ps.append(emitOk(user));
+                        ps.append("}else{"); ps.append(emitFail()); ps.append("}\n");
+                    } else {
+                        // Key Vault / Storage / SQL are client-REST modules - no Az context
+                        // needed, so just confirm the session (client stores the token).
+                        ps.append(emitOk(user));
+                    }
+                } else {
 
                 // Exchange refresh -> Graph token (server-side) to keep PS simple
                 QNetworkAccessManager nam;
@@ -1038,16 +1261,104 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                     return true;
                 }
 
+                // Also exchange refresh -> storage token so -UseConnectedAccount
+                // isn't needed (access-token sessions have no token cache).
+                QString storageToken;
+                {
+                    QUrl surl(QString("https://login.microsoftonline.com/%1/oauth2/v2.0/token").arg(
+                                tenantId.isEmpty() ? QStringLiteral("organizations") : tenantId));
+                    QNetworkRequest sreq(surl);
+                    sreq.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+                    QUrlQuery sform;
+                    sform.addQueryItem("client_id",  APP_CONFIG.defaultClientId());
+                    sform.addQueryItem("grant_type", "refresh_token");
+                    sform.addQueryItem("refresh_token", refresh);
+                    sform.addQueryItem("scope", "https://storage.azure.com/.default");
+                    QEventLoop sloop;
+                    QNetworkReply *srep = nam.post(sreq, sform.query(QUrl::FullyEncoded).toUtf8());
+                    QObject::connect(srep, &QNetworkReply::finished, &sloop, &QEventLoop::quit);
+                    sloop.exec();
+                    if (srep->error() == QNetworkReply::NoError)
+                        storageToken = QJsonDocument::fromJson(srep->readAll()).object().value("access_token").toString();
+                    srep->deleteLater();
+                }
+
+                // Also exchange refresh -> KeyVault token and inject it as
+                // -KeyVaultAccessToken so data-plane cmdlets (Get-AzKeyVaultSecret)
+                // work in the terminal without a device-code login / token cache.
+                QString keyVaultToken;
+                {
+                    QUrl kurl(QString("https://login.microsoftonline.com/%1/oauth2/v2.0/token").arg(
+                                tenantId.isEmpty() ? QStringLiteral("organizations") : tenantId));
+                    QNetworkRequest kreq(kurl);
+                    kreq.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+                    QUrlQuery kform;
+                    kform.addQueryItem("client_id",  APP_CONFIG.defaultClientId());
+                    kform.addQueryItem("grant_type", "refresh_token");
+                    kform.addQueryItem("refresh_token", refresh);
+                    kform.addQueryItem("scope", "https://vault.azure.net/.default");
+                    QEventLoop kloop;
+                    QNetworkReply *krep = nam.post(kreq, kform.query(QUrl::FullyEncoded).toUtf8());
+                    QObject::connect(krep, &QNetworkReply::finished, &kloop, &QEventLoop::quit);
+                    kloop.exec();
+                    if (krep->error() == QNetworkReply::NoError)
+                        keyVaultToken = QJsonDocument::fromJson(krep->readAll()).object().value("access_token").toString();
+                    krep->deleteLater();
+                }
+
                 // Az: Connect with both access and graph tokens
                 ps.append("$a=@\"\n"); ps.append(access.toUtf8()); ps.append("\n\"@\n");
                 ps.append("$g=@\"\n"); ps.append(mgToken.toUtf8()); ps.append("\n\"@\n");
+                if (!keyVaultToken.isEmpty()) {
+                    ps.append("$kv=@\"\n"); ps.append(keyVaultToken.toUtf8()); ps.append("\n\"@\n");
+                }
                 ps.append("try{Connect-AzAccount -AccessToken $a -MicrosoftGraphAccessToken $g ");
+                if (!keyVaultToken.isEmpty()) ps.append("-KeyVaultAccessToken $kv ");
                 if (!user.isEmpty())     ps.append(QString("-AccountId '%1' ").arg(escapePsString(user)).toUtf8());
                 if (!tenantId.isEmpty()) ps.append(QString("-TenantId '%1' ").arg(escapePsString(tenantId)).toUtf8());
                 ps.append("-WA Ignore|Out-Null\n");
+                // Also connect Microsoft.Graph with the same Graph token so Get-Mg*
+                // cmdlets work in the terminal (Connect-AzAccount's -MicrosoftGraphAccessToken
+                // only feeds Az's internal Graph calls, not the Mg module). Best-effort.
+                ps.append("try{Connect-MgGraph -NoWelcome -AccessToken(ConvertTo-SecureString $g -AsPlainText -Force)|Out-Null}catch{try{Connect-MgGraph -NoWelcome -AccessToken $g|Out-Null}catch{}}\n");
+                // Store storage token for the session_created event
+                if (!storageToken.isEmpty()) {
+                    QMutexLocker locker(&g_stateMutex);
+                    g_sessionInfo[sid].insert("storageToken", storageToken);
+                }
+                // Tag this as an inert access-token Az session so token re-injection
+                // (WS5 renewal) is allowed - full/live sessions must NOT be re-injected
+                // (it would downgrade them to AccessToken and break silent minting).
+                {
+                    QMutexLocker locker(&g_stateMutex);
+                    g_sessionInfo[sid].insert("azInjected", true);
+                }
+
+                // WS3: Storage data-plane cannot be injected into the Az context (no
+                // -StorageAccessToken param), so expose REST helpers that use the
+                // minted storage token directly: Get-AnimoStorageContainer/Blob/Content.
+                if (!storageToken.isEmpty()) {
+                    ps.append("$st=@\"\n"); ps.append(storageToken.toUtf8()); ps.append("\n\"@\n");
+                    ps.append("$global:AnimoStorageToken=$st\n");
+                    ps.append(
+                        "function global:Get-AnimoStorageContainer{param([Parameter(Mandatory)][string]$Account)"
+                        "$h=@{Authorization=\"Bearer $global:AnimoStorageToken\";'x-ms-version'='2021-08-06'};"
+                        "(Invoke-RestMethod -Uri \"https://$Account.blob.core.windows.net/?comp=list\" -Headers $h)."
+                        "EnumerationResults.Containers.Container|Select-Object Name}\n");
+                    ps.append(
+                        "function global:Get-AnimoStorageBlob{param([Parameter(Mandatory)][string]$Account,[Parameter(Mandatory)][string]$Container)"
+                        "$h=@{Authorization=\"Bearer $global:AnimoStorageToken\";'x-ms-version'='2021-08-06'};"
+                        "(Invoke-RestMethod -Uri \"https://$Account.blob.core.windows.net/$Container`?restype=container&comp=list\" -Headers $h)."
+                        "EnumerationResults.Blobs.Blob|Select-Object Name,@{n='Size';e={$_.Properties.'Content-Length'}}}\n");
+                    ps.append(
+                        "function global:Get-AnimoBlobContent{param([Parameter(Mandatory)][string]$Account,[Parameter(Mandatory)][string]$Container,[Parameter(Mandatory)][string]$Blob)"
+                        "$h=@{Authorization=\"Bearer $global:AnimoStorageToken\";'x-ms-version'='2021-08-06'};"
+                        "Invoke-RestMethod -Uri \"https://$Account.blob.core.windows.net/$Container/$Blob\" -Headers $h}\n");
+                }
                 ps.append("$ctx=Get-AzContext -EA SilentlyContinue\n");
                 ps.append("if($ctx-and$ctx.Account){Write-Output \"__ANIMO_LOGIN_OK__:$($ctx.Account)\"}");
                 ps.append("else{"); ps.append(emitFail()); ps.append("}}catch{"); ps.append(emitFail()); ps.append("}\n");
+                }   // end refresh-based Az path
             }
 
             // Write script directly to stdin (more reliable than sourcing file)
@@ -1098,7 +1409,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                     .arg(cmd.size()).arg(MAX_CMD_LENGTH)));
             return true;
         }
-        QProcess *proc = ensureProcess(this, sid);
+        QProcess *proc = ensureProcess(this, sid, operatorBySocket_.value(sock, QStringLiteral("unknown")));
         if (!proc) {
             sendTo(sock, Protocol::err("session not available"));
             return true;
@@ -1112,46 +1423,39 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 g_authState[sid] = AuthState::Success;
             }
 
-            // Check if previous command is still running (with timeout)
+            // If a command is already running, queue this one. It is dispatched when the
+            // active command completes (see the command_complete path in the stdout hook).
             if (g_activeCmdId.contains(sid)) {
                 qint64 now = QDateTime::currentMSecsSinceEpoch();
                 qint64 started = g_cmdStartTime.value(sid, 0);
                 if (now - started < CMD_TIMEOUT_MS) {
-                    // Previous command still active, queue this one
-                    // For simplicity, just reject and tell client to retry
-                    sendTo(sock, Protocol::err("previous command still running, please wait"));
+                    if (g_cmdQueue.value(sid).size() >= MAX_CMD_QUEUE) {
+                        sendTo(sock, Protocol::err("command queue full, please wait"));
+                        return true;
+                    }
+                    g_cmdQueue[sid].append(QueuedCommand{cmdId, cmd,
+                        operatorBySocket_.value(sock, QStringLiteral("unknown"))});
+                    broadcastToSession(sid,
+                        QJsonObject{ {Protocol::F_ACTION, "command_queued"},
+                                     {"sessionId", sid}, {Protocol::F_CMD_ID, cmdId},
+                                     {"command", cmd} });
+                    QJsonObject qack = Protocol::ok("command queued");
+                    qack.insert(Protocol::F_CMD_ID, cmdId);
+                    sendTo(sock, qack);
                     return true;
                 }
-                // Timeout - clear stale command state
+                // Timeout - clear stale command state AND discard any orphaned output
+                // from the abandoned command so it can't contaminate this one.
                 g_activeCmdId.remove(sid);
                 g_cmdStartTime.remove(sid);
+                g_stdoutBuf.remove(sid);
             }
 
-            // Mark this command as active
-            g_activeCmdId[sid] = cmdId;
-            g_cmdStartTime[sid] = QDateTime::currentMSecsSinceEpoch();
+            dispatchCommand(sid, cmdId, cmd, operatorBySocket_.value(sock, QStringLiteral("unknown")));
         }
 
-        // Persist the command
-        SessionDBManager::instance().createSessionDB(sid);
-        SessionDBManager::instance().insertCommandOutput(sid, cmd, QString(), cmdId);
-
-        // Execute with markers
-        const QString wrapped = OutputSanitizer::wrapPwshCommandWithId(cmd, cmdId);
-        proc->write(wrapped.toUtf8());
-        proc->write("\n");
-
-        // Notify client
-        {
-            QMutexLocker locker(&g_stateMutex);
-            broadcastTo(g_subscribers.value(sid),
-                QJsonObject{
-                    {Protocol::F_ACTION, "command_started"},
-                    {"sessionId", sid},
-                    {Protocol::F_CMD_ID, cmdId},
-                    {"command", cmd}
-                });
-        }
+        SessionDBManager::instance().logAudit(
+            operatorBySocket_.value(sock, QStringLiteral("unknown")), "run_command", sid, cmd.left(200));
 
         QJsonObject ack = Protocol::ok("command accepted");
         ack.insert(Protocol::F_CMD_ID, cmdId);
@@ -1167,7 +1471,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         QJsonArray arr;
         if (db.isOpen()) {
             QSqlQuery q(db);
-            q.prepare("SELECT SessionID, User, TenantID, DefaultDomain, Resource "
+            q.prepare("SELECT SessionID, User, TenantID, DefaultDomain, Resource, CreatedBy "
                       "FROM sessions ORDER BY CreatedAt DESC");
             if (q.exec()) {
                 while (q.next()) {
@@ -1179,6 +1483,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                     row.insert("tenantId",  q.value(2).toString());
                     row.insert("domain",    q.value(3).toString());
                     row.insert("resource",  q.value(4).toString());
+                    row.insert("createdBy", q.value(5).toString());
 
                     {
                         QMutexLocker locker(&g_stateMutex);
@@ -1204,6 +1509,67 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         return true;
     }
 
+    // ── Re-inject fresh per-audience tokens into an inert Az session (WS5) ───────
+    // Keeps the terminal's Az/Mg context alive past the ~1h token expiry. Silently
+    // ignored for full/live sessions (would downgrade them to AccessToken).
+    if (action == QStringLiteral("reinject_tokens")) {
+        const QString sid = obj.value("sessionId").toString().trimmed();
+        if (!isValidSessionId(sid)) {
+            sendTo(sock, Protocol::err("invalid sessionId format"));
+            return true;
+        }
+        bool injected = false;
+        {
+            QMutexLocker locker(&g_stateMutex);
+            injected = g_sessionInfo.value(sid).value("azInjected").toBool();
+        }
+        QProcess *proc = g_sessions.value(sid, nullptr);
+        if (!proc || !injected) {
+            // Not an inert Az session (or gone) - no-op, ack so the client moves on.
+            sendTo(sock, Protocol::ok("reinject skipped"));
+            return true;
+        }
+        const QString access  = obj.value("accessToken").toString();
+        const QString graph   = obj.value("graphToken").toString();
+        const QString keyVault= obj.value("keyVaultToken").toString();
+        const QString user    = obj.value("user").toString();
+        const QString tenant  = obj.value("tenantId").toString();
+        if (access.isEmpty()) {
+            sendTo(sock, Protocol::err("reinject requires accessToken"));
+            return true;
+        }
+
+        QByteArray ps;
+        ps.append("$a=@\"\n"); ps.append(access.toUtf8()); ps.append("\n\"@\n");
+        if (!graph.isEmpty())    { ps.append("$g=@\"\n");  ps.append(graph.toUtf8());    ps.append("\n\"@\n"); }
+        if (!keyVault.isEmpty()) { ps.append("$kv=@\"\n"); ps.append(keyVault.toUtf8()); ps.append("\n\"@\n"); }
+        ps.append("try{Connect-AzAccount -AccessToken $a ");
+        if (!graph.isEmpty())    ps.append("-MicrosoftGraphAccessToken $g ");
+        if (!keyVault.isEmpty()) ps.append("-KeyVaultAccessToken $kv ");
+        if (!user.isEmpty())     ps.append(QString("-AccountId '%1' ").arg(escapePsString(user)).toUtf8());
+        if (!tenant.isEmpty())   ps.append(QString("-TenantId '%1' ").arg(escapePsString(tenant)).toUtf8());
+        ps.append("-WA Ignore|Out-Null}catch{}\n");
+        if (!graph.isEmpty())
+            ps.append("try{Connect-MgGraph -NoWelcome -AccessToken(ConvertTo-SecureString $g -AsPlainText -Force)|Out-Null}catch{}\n");
+
+        // Never write into the terminal while a command is running - it would
+        // interleave with that command's output stream. Queue the payload; the
+        // command_complete path flushes it as soon as the command finishes so
+        // the terminal's Az context is refreshed with no operator involvement.
+        if (g_activeCmdId.contains(sid)) {
+            {
+                QMutexLocker locker(&g_stateMutex);
+                g_pendingReinject.insert(sid, ps);  // overwrites older pending payload
+            }
+            sendTo(sock, Protocol::ok("reinject queued (busy - will apply on command complete)"));
+            return true;
+        }
+
+        proc->write(ps);
+        sendTo(sock, Protocol::ok("reinject ok"));
+        return true;
+    }
+
     // ── Get session info (+ ensure proc, subscribe) ────────────────────────────
     if (action == QStringLiteral("get_session")) {
         const QString sid = obj.value("sessionId").toString().trimmed();
@@ -1217,14 +1583,28 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         }
 
         // Ensure process exists/starts and subscribe caller
-        QProcess *proc = ensureProcess(this, sid);
+        QProcess *proc = ensureProcess(this, sid, operatorBySocket_.value(sock, QStringLiteral("unknown")));
         if (!proc) {
             sendTo(sock, Protocol::err("failed to ensure session process"));
             return true;
         }
+        QByteArray earlyToReplay;
         {
             QMutexLocker locker(&g_stateMutex);
             g_subscribers[sid].insert(sock);
+            // First subscriber to see this session -> replay any pre-login
+            // stdout that arrived before the tab existed. This is where the
+            // SPN login-script's [Animo] subscription list finally reaches
+            // the user's terminal.
+            earlyToReplay = g_earlyOutput.take(sid);
+        }
+        if (!earlyToReplay.isEmpty()) {
+            sendTo(sock, QJsonObject{
+                {Protocol::F_ACTION, "output"},
+                {"sessionId", sid},
+                {"stream", "stdout"},
+                {"data", QString::fromUtf8(earlyToReplay)}
+            });
         }
 
         // Pull canonical info from main DB
@@ -1282,6 +1662,9 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
+        SessionDBManager::instance().logAudit(
+            operatorBySocket_.value(sock, QStringLiteral("unknown")), "remove_session", sid, QString());
+
         // Kill PS proc and clean global state
         QProcess *procToKill = nullptr;
         {
@@ -1302,6 +1685,9 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             g_activeCmdId.remove(sid);
             g_cmdStartTime.remove(sid);
             g_pendingToken.remove(sid);
+            g_pendingReinject.remove(sid);
+            g_earlyOutput.remove(sid);
+            g_cmdQueue.remove(sid);
         }
         if (procToKill) {
             procToKill->kill();
@@ -1326,6 +1712,43 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         return true;
     }
 
+    // ── Update session metadata (heal DB rows created before real identity was persisted) ─
+    // Client calls this after `list_sessions` if it sees a placeholder row but
+    // has better data in its TokenStore (parsed from the JWT). We upsert-style
+    // update the DB so the placeholder never comes back on the next list.
+    if (action == QStringLiteral("update_session_meta")) {
+        const QString sid    = obj.value("sessionId").toString().trimmed();
+        const QString user   = obj.value("user").toString().trimmed();
+        const QString ten    = obj.value("tenantId").toString().trimmed();
+        const QString dom    = obj.value("domain").toString().trimmed();
+        if (sid.isEmpty() || !isValidSessionId(sid)) {
+            sendTo(sock, Protocol::err("update_session_meta: invalid sessionId"));
+            return true;
+        }
+        auto isPlaceholder = [](const QString &v) {
+            return v.isEmpty() || v == QStringLiteral("Unknown") || v == QStringLiteral("N/A");
+        };
+        if (!isPlaceholder(user)) SessionDBManager::instance().updateSessionUser(sid, user);
+        if (!isPlaceholder(ten) || !isPlaceholder(dom)) {
+            SessionDBManager::instance().updateSessionTenant(sid,
+                isPlaceholder(ten) ? QStringLiteral("N/A") : ten,
+                isPlaceholder(dom) ? QStringLiteral("N/A") : dom);
+        }
+        // Also keep the in-memory copy in sync so subsequent list responses are correct.
+        {
+            QMutexLocker locker(&g_stateMutex);
+            QJsonObject m = g_sessionInfo.value(sid);
+            if (!isPlaceholder(user)) m.insert("user", user);
+            if (!isPlaceholder(ten))  m.insert("tenantId", ten);
+            if (!isPlaceholder(dom))  m.insert("domain", dom);
+            g_sessionInfo.insert(sid, m);
+        }
+        qInfo().noquote() << QString("[Server] healed session %1 metadata (user=%2)")
+                                .arg(sid.left(8), user);
+        sendTo(sock, Protocol::ok("session meta updated"));
+        return true;
+    }
+
     // ── Attach (subscribe) ─────────────────────────────────────────────────────
     if (action == QStringLiteral("attach")) {
         const QString sid = obj.value("sessionId").toString().trimmed();
@@ -1338,7 +1761,7 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
         // Ensure process exists and subscribe
-        QProcess *proc = ensureProcess(this, sid);
+        QProcess *proc = ensureProcess(this, sid, operatorBySocket_.value(sock, QStringLiteral("unknown")));
         if (!proc) {
             sendTo(sock, Protocol::err("session not available"));
             return true;
@@ -1406,10 +1829,13 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
 
         bool success = SessionDBManager::instance().logToken(
             sessionId, source, accessToken, refreshToken, idToken,
-            user, tenantId, resource, scope, expiresIn
+            user, tenantId, resource, scope, expiresIn,
+            operatorBySocket_.value(sock, QStringLiteral("unknown"))
         );
 
         if (success) {
+            SessionDBManager::instance().logAudit(
+                operatorBySocket_.value(sock, QStringLiteral("unknown")), "capture_token", sessionId, source);
             sendTo(sock, Protocol::ok("token logged"));
             emit log(QString("[+] Token logged: session=%1, source=%2, user=%3")
                      .arg(sessionId, source, user.isEmpty() ? "N/A" : user));
@@ -1474,6 +1900,15 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         return true;
     }
 
+    // ── Operator activity audit log ───────────────────────────────────────────
+    if (action == QStringLiteral("get_audit")) {
+        const int limit = obj.value("limit").toInt(500);
+        QJsonObject resp = Protocol::ok("audit retrieved");
+        resp.insert("audit", SessionDBManager::instance().getAuditLog(limit));
+        sendTo(sock, resp);
+        return true;
+    }
+
     // ── Import Session (from encrypted backup) ────────────────────────────────
     if (action == Protocol::ACTION_IMPORT_SESSION) {
         QString sessionId = obj.value("sessionId").toString().trimmed();
@@ -1496,10 +1931,13 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         }
 
         bool success = SessionDBManager::instance().addSessionToMainDB(
-            sessionId, user, tenantId, defaultDomain, resource
+            sessionId, user, tenantId, defaultDomain, resource,
+            operatorBySocket_.value(sock, QStringLiteral("unknown"))
         );
 
         if (success) {
+            SessionDBManager::instance().logAudit(
+                operatorBySocket_.value(sock, QStringLiteral("unknown")), "import_session", sessionId, user);
             QJsonObject resp = Protocol::ok("session imported");
             resp.insert("sessionId", sessionId);
             sendTo(sock, resp);
@@ -1548,13 +1986,24 @@ bool Server::handleLogin(QTcpSocket *sock, const QJsonObject &obj) {
         return true;
     }
 
+    // Operator identity used for activity attribution (claimed, not verified).
+    QString op = obj.value(Protocol::F_USERNAME).toString().trimmed();
+    op.remove(QRegularExpression(QStringLiteral("[\\x00-\\x1F\\x7F]")));  // strip control chars
+    if (op.size() > 64) op = op.left(64);
+    if (op.isEmpty()) {
+        sock->write(Protocol::toBytes(Protocol::err("operator username required")));
+        return true;
+    }
+
     if (constantTimeCompare(pass, allowedPass_)) {
         authed_.insert(sock);
+        operatorBySocket_.insert(sock, op);
         // Reset failures on success
         attempt.failCount = 0;
         attempt.lockoutUntilMs = 0;
         sock->write(Protocol::toBytes(Protocol::ok("login ok")));
-        emit log(QString("[+] Auth success from %1").arg(clientIp));
+        emit log(QString("[+] Auth success: operator '%1' from %2").arg(op, clientIp));
+        SessionDBManager::instance().logAudit(op, "login", clientIp, QString());
     } else {
         attempt.failCount++;
         attempt.lastAttemptMs = now;

@@ -2,9 +2,46 @@
 #include <QCommandLineParser>
 #include <QCommandLineOption>
 #include <QDebug>
+#include <QFile>
+#include <QTextStream>
+#include <QDateTime>
+#include <QMutex>
 #include "Server.h"
 
+namespace {
+// Mirror every qDebug/qInfo/qWarning to /tmp/animo-srv-dbg.log so terminal
+// scrollback loss can't hide the diagnostic lines we need for triage.
+QFile *g_dbgLog = nullptr;
+QMutex g_dbgLogMutex;
+void animoServerMessageHandler(QtMsgType type, const QMessageLogContext &, const QString &msg) {
+    const char *lvl = "?";
+    switch (type) {
+        case QtDebugMsg:    lvl = "D"; break;
+        case QtInfoMsg:     lvl = "I"; break;
+        case QtWarningMsg:  lvl = "W"; break;
+        case QtCriticalMsg: lvl = "C"; break;
+        case QtFatalMsg:    lvl = "F"; break;
+    }
+    const QString line = QString("[%1] [%2] %3\n")
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs), lvl, msg);
+    // Terminal
+    fprintf(stderr, "%s", qUtf8Printable(line));
+    fflush(stderr);
+    // File
+    QMutexLocker lk(&g_dbgLogMutex);
+    if (g_dbgLog && g_dbgLog->isOpen()) {
+        g_dbgLog->write(line.toUtf8());
+        g_dbgLog->flush();
+    }
+}
+} // namespace
+
 int main(int argc, char *argv[]) {
+    // Install log-to-file handler before anything else so we catch startup output.
+    g_dbgLog = new QFile("/tmp/animo-srv-dbg.log");
+    g_dbgLog->open(QIODevice::WriteOnly | QIODevice::Truncate);
+    qInstallMessageHandler(animoServerMessageHandler);
+
     QCoreApplication app(argc, argv);
     app.setApplicationName("ANIMOServer");
     app.setApplicationVersion("1.0");

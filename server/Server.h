@@ -50,6 +50,7 @@ private:
     QTcpServer tcp_;
     QSet<QTcpSocket*> clients_;
     QSet<QTcpSocket*> authed_; // sockets that passed login
+    QHash<QTcpSocket*, QString> operatorBySocket_; // authed socket -> operator handle (for attribution)
 
     // Bind + auth config
     QString bindIp_;

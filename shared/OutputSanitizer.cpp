@@ -170,24 +170,37 @@ QString OutputSanitizer::wrapPwshCommand(const QString &cmd) {
 }
 
 QString OutputSanitizer::wrapPwshCommandWithId(const QString &cmd, const QString &cmdId) {
-    // Single-line wrapper to avoid any multiline parsing issues
-    // All commands executed inline, no scriptblocks
+    // The command is Base64-encoded (UTF-8) so arbitrary content - multi-line
+    // commands, quotes, semicolons, even text that looks like a marker - can never
+    // break the single-line stdin framing. It is decoded and run inside PowerShell.
+    const QString b64 = QString::fromLatin1(cmd.toUtf8().toBase64());
 
-    QString wrapped;
-
-    // Everything on one logical line, separated by semicolons
-    wrapped  = "try{$Host.UI.RawUI.BufferSize=New-Object Management.Automation.Host.Size(9999,9999)}catch{};";
-    wrapped += "$PSDefaultParameterValues['Format-Table:Wrap']=$true;";
-    wrapped += "$PSDefaultParameterValues['Out-String:Width']=9999;";
-    wrapped += QString("Write-Output \"__QZ_BEGIN__:%1\";").arg(cmdId);
-    wrapped += "$ErrorActionPreference='Continue';";
-
-    // The key fix: execute command inline without scriptblock braces
-    // Just pipe directly from the command
-    wrapped += QString("%1 2>&1|Out-String -Width 9999 -Stream|ForEach-Object{if($_){Write-Output $_}};").arg(cmd);
-
-    // End marker
-    wrapped += QString("Write-Output \"__QZ_END__:%1\"\n").arg(cmdId);
-
-    return wrapped;
+    // One logical stdin line. try/catch/finally guarantees the END marker is written
+    // even when the command throws a terminating error, so the output segment ALWAYS
+    // closes and can never merge into the next command. The EXIT marker carries a
+    // failed flag (from $Error growth / a caught exception) plus $LASTEXITCODE so the
+    // server can tell success from failure.
+    QString w;
+    w += QString("$__qzid='%1';").arg(cmdId);
+    w += QString("$__qzcmd=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%1'));").arg(b64);
+    // Emit errors (SilentlyContinue during session init would otherwise hide them).
+    w += "$ErrorActionPreference='Continue';";
+    w += "$PSDefaultParameterValues['Out-String:Width']=512;";
+    w += "$__qzeb=$Error.Count;$__qzcaught=$false;";
+    w += "Write-Output \"__QZ_BEGIN__:$__qzid\";";
+    w += "try{";
+    // & (ScriptBlock) captures non-terminating errors via 2>&1 (Invoke-Expression drops them)
+    // and still parses multi-line commands; a parse error throws into the catch below.
+    w +=   "& ([ScriptBlock]::Create($__qzcmd)) 2>&1|Out-String -Stream -Width 512|ForEach-Object{if($null -ne $_){Write-Output $_}};";
+    w += "}catch{";
+    w +=   "$__qzcaught=$true;";
+    w +=   "Write-Output \"__QZ_ERR__:$__qzid\";";
+    w +=   "Write-Output ($_|Out-String -Width 512);";
+    w += "}finally{";
+    w +=   "$__qzfail=$__qzcaught -or ($Error.Count -gt $__qzeb);";
+    // ${__qzid} must be brace-delimited: a bare $var followed by ':' is parsed as scope syntax.
+    w +=   "Write-Output \"__QZ_EXIT__:${__qzid}:$(if($__qzfail){'1'}else{'0'}):$LASTEXITCODE\";";
+    w +=   "Write-Output \"__QZ_END__:$__qzid\";";
+    w += "}\n";
+    return w;
 }
