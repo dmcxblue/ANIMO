@@ -57,6 +57,7 @@ public:
     static QWidget* createPostExploitWindow(QWidget *parent = nullptr);
     static QWidget* createEmailRulesWindow(QWidget *parent = nullptr);
     static QWidget* createConsentManipulationWindow(QWidget *parent = nullptr);
+    static QWidget* createAuthMethodPersistenceWindow(QWidget *parent = nullptr);
 
     // Reporting / Timeline
     static QWidget* createSessionTimelineWindow(QWidget *parent = nullptr);

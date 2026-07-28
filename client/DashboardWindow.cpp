@@ -270,9 +270,11 @@ void DashboardWindow::initUI()
     // === Persistence menu ===
     QAction *actionEmailRules        = persistenceMenu->addAction("Email Inbox Rules");
     QAction *actionConsentManip      = persistenceMenu->addAction("Consent Manipulation");
+    QAction *actionAuthMethods       = persistenceMenu->addAction("Auth Methods (TAP / Backdoor MFA)");
     QAction *actionWfh               = persistenceMenu->addAction("Windows Hello Attack");
     connect(actionEmailRules,   &QAction::triggered, this, &DashboardWindow::openEmailRulesWindow);
     connect(actionConsentManip, &QAction::triggered, this, &DashboardWindow::openConsentManipulationWindow);
+    connect(actionAuthMethods,  &QAction::triggered, this, &DashboardWindow::openAuthMethodPersistenceWindow);
     connect(actionWfh,          &QAction::triggered, this, &DashboardWindow::openAttackWfh);
 
     // === Logs menu ===
@@ -1731,6 +1733,12 @@ void DashboardWindow::openEmailRulesWindow() {
 void DashboardWindow::openConsentManipulationWindow() {
     auto *win = WindowFactory::createConsentManipulationWindow();
     WindowHelper::setupWindow(win, this, 1300, 850, 1100, 700);
+    win->show();
+}
+
+void DashboardWindow::openAuthMethodPersistenceWindow() {
+    auto *win = WindowFactory::createAuthMethodPersistenceWindow();
+    WindowHelper::setupWindow(win, this, 1050, 780, 900, 600);
     win->show();
 }
 

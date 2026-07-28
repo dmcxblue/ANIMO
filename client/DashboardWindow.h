@@ -155,6 +155,7 @@ public slots:
     // Persistence features
     void openEmailRulesWindow();
     void openConsentManipulationWindow();
+    void openAuthMethodPersistenceWindow();
 
     // Auto session persistence
     void autoRestoreSessions();

@@ -42,6 +42,7 @@
 #include "PostExploitWindow.h"
 #include "EmailRulesWindow.h"
 #include "ConsentManipulationWindow.h"
+#include "AuthMethodPersistenceWindow.h"
 
 // Reporting / Timeline
 #include "SessionTimelineWindow.h"
@@ -197,6 +198,10 @@ QWidget* WindowFactory::createEmailRulesWindow(QWidget *parent) {
 
 QWidget* WindowFactory::createConsentManipulationWindow(QWidget *parent) {
     return new ConsentManipulationWindow(parent);
+}
+
+QWidget* WindowFactory::createAuthMethodPersistenceWindow(QWidget *parent) {
+    return new AuthMethodPersistenceWindow(parent);
 }
 
 // ============================================================================
