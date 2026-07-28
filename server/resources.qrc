@@ -2,6 +2,7 @@
     <qresource prefix="/">
         <file>scripts/login_graph.ps1</file>
         <file>scripts/login_azure.ps1</file>
+        <file>scripts/login_azure_devicecode.ps1</file>
         <file>scripts/login_spn_azure.ps1</file>
     </qresource>
 </RCC>

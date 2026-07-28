@@ -2,10 +2,18 @@ param([string]$Username,[string]$Password)
 $ErrorActionPreference='Stop'
 $mfa='AADSTS50076|AADSTS50079|AADSTS50158|AADSTS53003|AADSTS50074|AADSTS500121'
 try {
+    # Start from a clean context so a stale persisted AccessToken login can't shadow
+    # this ROPC login (would otherwise serve expired tokens). With per-session
+    # AZURE_CONFIG_DIR this only touches THIS session's context.
+    Disconnect-AzAccount -EA SilentlyContinue|Out-Null
+    Clear-AzContext -Force -EA SilentlyContinue|Out-Null
     $c=[PSCredential]::new($Username,(ConvertTo-SecureString $Password -AsPlainText -Force))
     Connect-AzAccount -Credential $c -EA Stop -WA Ignore|Out-Null
     $ctx=Get-AzContext -EA SilentlyContinue
-    if($ctx-and$ctx.Account){Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"}
+    if($ctx-and$ctx.Account){
+        try{$t=(Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
+        Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"
+    }
     else{Write-Output "__ANIMO_LOGIN_FAIL__:No context"}
 } catch {
     $e=$_.Exception.Message

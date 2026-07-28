@@ -122,8 +122,14 @@ def try_ropc_login(username, password, resource, client_id, tenant):
     except Exception as e:
         return {"success": False, "message": str(e)}
 
-def try_interactive_login(resource, client_id, tenant):
-    """Try interactive browser login"""
+def try_interactive_login(resource, client_id, tenant, expected_username=None):
+    """Try interactive browser login.
+
+    expected_username: the account this session is supposed to be for. We pass it as a
+    login_hint and force the account picker (prompt=select_account) so a leftover browser
+    SSO cookie for a different user can't silently sign us in as the wrong account. After
+    login we verify the returned UPN matches, and fail on mismatch.
+    """
     try:
         from msal import PublicClientApplication
 
@@ -132,8 +138,11 @@ def try_interactive_login(resource, client_id, tenant):
 
         app = PublicClientApplication(client_id, authority=authority)
 
-        # This opens a browser window for authentication
-        result = app.acquire_token_interactive(scopes=scopes)
+        # login_hint pre-fills the requested user; prompt=select_account defeats silent SSO.
+        kwargs = {"scopes": scopes, "prompt": "select_account"}
+        if expected_username:
+            kwargs["login_hint"] = expected_username
+        result = app.acquire_token_interactive(**kwargs)
 
         if "access_token" in result:
             access_token = result["access_token"]
@@ -145,6 +154,12 @@ def try_interactive_login(resource, client_id, tenant):
             upn = decode_jwt_claim(id_token, "upn") or decode_jwt_claim(id_token, "preferred_username") or ""
             if not upn:
                 upn = decode_jwt_claim(access_token, "upn") or decode_jwt_claim(access_token, "unique_name") or ""
+
+            # Guard against signing in as the wrong account (SSO shortcut, wrong pick).
+            if expected_username and upn and upn.lower() != expected_username.lower():
+                return {"success": False,
+                        "message": f"Signed-in account '{upn}' does not match the requested "
+                                   f"user '{expected_username}'. Aborted to avoid a mismatched session."}
 
             return {
                 "success": True,
@@ -186,7 +201,7 @@ def main():
 
     if args.interactive:
         # Direct interactive login
-        result = try_interactive_login(args.resource, args.client_id, args.tenant)
+        result = try_interactive_login(args.resource, args.client_id, args.tenant, args.username)
         if result.get("success"):
             output_success(
                 result["access_token"],
@@ -217,7 +232,7 @@ def main():
                 sys.stderr.write("[*] ROPC failed, launching interactive browser...\n")
                 sys.stderr.flush()
 
-                interactive_result = try_interactive_login(args.resource, args.client_id, args.tenant)
+                interactive_result = try_interactive_login(args.resource, args.client_id, args.tenant, args.username)
                 if interactive_result.get("success"):
                     output_success(
                         interactive_result["access_token"],
@@ -237,7 +252,7 @@ def main():
                 sys.stderr.write("[*] Launching interactive browser...\n")
                 sys.stderr.flush()
 
-                interactive_result = try_interactive_login(args.resource, args.client_id, args.tenant)
+                interactive_result = try_interactive_login(args.resource, args.client_id, args.tenant, args.username)
                 if interactive_result.get("success"):
                     output_success(
                         interactive_result["access_token"],
