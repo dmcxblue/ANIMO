@@ -156,6 +156,7 @@ public slots:
     void openEmailRulesWindow();
     void openConsentManipulationWindow();
     void openAuthMethodPersistenceWindow();
+    void openDeviceJoinWindow();
 
     // Auto session persistence
     void autoRestoreSessions();

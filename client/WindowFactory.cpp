@@ -43,6 +43,7 @@
 #include "EmailRulesWindow.h"
 #include "ConsentManipulationWindow.h"
 #include "AuthMethodPersistenceWindow.h"
+#include "DeviceJoinWindow.h"
 
 // Reporting / Timeline
 #include "SessionTimelineWindow.h"
@@ -202,6 +203,10 @@ QWidget* WindowFactory::createConsentManipulationWindow(QWidget *parent) {
 
 QWidget* WindowFactory::createAuthMethodPersistenceWindow(QWidget *parent) {
     return new AuthMethodPersistenceWindow(parent);
+}
+
+QWidget* WindowFactory::createDeviceJoinWindow(QWidget *parent) {
+    return new DeviceJoinWindow(parent);
 }
 
 // ============================================================================
