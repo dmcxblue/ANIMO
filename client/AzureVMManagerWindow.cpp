@@ -440,6 +440,14 @@ void AzureVMManagerWindow::runCommand() {
         return;
     }
 
+    // Only one runCommand may be in flight per VM - a second returns HTTP 409.
+    if (runCommandInProgress) {
+        appendLog("[!] A command is already running on this VM - wait for it to finish.", "yellow");
+        return;
+    }
+    runCommandInProgress = true;
+    runCommandRetries = 0;
+
     setLoading(true);
     appendLog(QString("[*] Running command on VM: %1").arg(currentVMName), "cyan");
     outputArea->setText("Executing command...\n");
@@ -455,6 +463,10 @@ void AzureVMManagerWindow::runCommand() {
     body.insert("commandId", commandId);
     body.insert("script", QJsonArray{command});
 
+    postRunCommand(token, url, body);
+}
+
+void AzureVMManagerWindow::postRunCommand(const QString &token, const QString &url, const QJsonObject &body) {
     QNetworkRequest req = NetworkHelper::createBearerRequest(url, token);
     QNetworkReply *reply = net->post(req, QJsonDocument(body).toJson());
 
@@ -462,42 +474,158 @@ void AzureVMManagerWindow::runCommand() {
         appendLog("[-] Error: Failed to create network request", "red");
         outputArea->append("Error: Failed to create network request");
         setLoading(false);
+        runCommandInProgress = false;
         return;
     }
     activeReplies.append(reply);
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, token, url, body]() {
         activeReplies.removeAll(reply);
         reply->deleteLater();
-        setLoading(false);
+
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+        // 409 Conflict = another runCommand is still finishing on this VM (Azure allows
+        // only one at a time). Wait and retry a few times before giving up.
+        if (status == 409 && runCommandRetries < 3) {
+            runCommandRetries++;
+            appendLog(QString("[!] VM busy (HTTP 409) - a runCommand is still in progress. Retry %1/3 in 10s...")
+                          .arg(runCommandRetries), "yellow");
+            QTimer::singleShot(10000, this, [this, token, url, body]() { postRunCommand(token, url, body); });
+            return;
+        }
 
         QString errorMsg;
         if (!NetworkHelper::isReplySuccess(reply, &errorMsg)) {
+            setLoading(false);
+            runCommandInProgress = false;
+            if (status == 409) {
+                appendLog("[-] VM still busy after retries - another runCommand is running. Try again shortly.", "red");
+                outputArea->append("VM busy: another runCommand is still in progress (HTTP 409).");
+                return;
+            }
             QString detailedError = NetworkHelper::parseApiError(reply);
             appendLog(QString("[-] Error: %1").arg(detailedError), "red");
             outputArea->append(QString("Error: %1").arg(detailedError));
             return;
         }
 
+        // Azure runCommand is long-running: 202 Accepted with Azure-AsyncOperation
+        // (or Location) pointing to the poll URL. The response body is empty at
+        // this point; script output only appears once we poll to completion.
+        QByteArray asyncHdr  = reply->rawHeader("Azure-AsyncOperation");
+        QByteArray locHdr    = reply->rawHeader("Location");
+        QString pollUrl = QString::fromUtf8(!asyncHdr.isEmpty() ? asyncHdr : locHdr).trimmed();
+
+        if (status == 202 && !pollUrl.isEmpty()) {
+            appendLog(QString("[*] Command accepted (202). Polling for completion..."), "cyan");
+            outputArea->setText("Executing on VM (this can take 30-120s)...\n");
+            pollRunCommand(token, pollUrl, 0);
+            return;
+        }
+
+        // Rare fallback: 200 with an inline result body (some api-versions /
+        // extension VMs return the script output synchronously).
         QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
         QJsonObject result = doc.object();
-
-        // Parse output
         QJsonArray outputs = result.value("value").toArray();
         QString outputText;
         for (const QJsonValue &v : outputs) {
             QJsonObject out = v.toObject();
-            QString code = out.value("code").toString();
-            QString message = out.value("message").toString();
-            outputText += QString("[%1]\n%2\n").arg(code, message);
+            outputText += QString("[%1]\n%2\n").arg(out.value("code").toString(),
+                                                     out.value("message").toString());
         }
-
-        if (outputText.isEmpty()) {
-            outputText = "Command executed (no output)";
-        }
-
+        if (outputText.isEmpty()) outputText = "Command executed (no output)";
         outputArea->setText(outputText);
         appendLog("[+] Command executed successfully", "green");
+        setLoading(false);
+        runCommandInProgress = false;
+    });
+}
+
+void AzureVMManagerWindow::pollRunCommand(const QString &token, const QString &asyncUrl, int attempt) {
+    // Cap polling at ~5 minutes (60 attempts * 5s). Beyond that we assume the
+    // op is wedged or the script is running much longer than usable in the UI.
+    constexpr int kMaxAttempts = 60;
+    constexpr int kIntervalMs  = 5000;
+
+    if (attempt >= kMaxAttempts) {
+        appendLog("[-] Timed out waiting for runCommand to complete (5 min).", "red");
+        outputArea->append("Timeout: script did not finish within 5 minutes.");
+        setLoading(false);
+        runCommandInProgress = false;
+        return;
+    }
+
+    QNetworkRequest req = NetworkHelper::createBearerRequest(asyncUrl, token);
+    QNetworkReply *reply = net->get(req);
+    if (!reply) {
+        appendLog("[-] Error: failed to issue poll request", "red");
+        setLoading(false);
+        runCommandInProgress = false;
+        return;
+    }
+    activeReplies.append(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, token, asyncUrl, attempt]() {
+        activeReplies.removeAll(reply);
+        reply->deleteLater();
+
+        QString errorMsg;
+        if (!NetworkHelper::isReplySuccess(reply, &errorMsg)) {
+            appendLog(QString("[-] Poll failed: %1").arg(NetworkHelper::parseApiError(reply)), "red");
+            outputArea->append(QString("Poll error: %1").arg(errorMsg));
+            setLoading(false);
+            runCommandInProgress = false;
+            return;
+        }
+
+        const QJsonObject body = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString status = body.value("status").toString();
+
+        if (status.compare("InProgress", Qt::CaseInsensitive) == 0 || status.isEmpty()) {
+            // Still running - schedule next poll. Empty status covers responses
+            // that only carry provisioningState during early polling.
+            const int next = attempt + 1;
+            if (next % 4 == 0) {
+                appendLog(QString("[*] Still running... (%1s)").arg(next * kIntervalMs / 1000), "gray");
+            }
+            QTimer::singleShot(kIntervalMs, this, [this, token, asyncUrl, next]() {
+                pollRunCommand(token, asyncUrl, next);
+            });
+            return;
+        }
+
+        // Terminal state - either Succeeded or Failed/Canceled.
+        setLoading(false);
+        runCommandInProgress = false;
+
+        if (status.compare("Succeeded", Qt::CaseInsensitive) == 0) {
+            // Azure nests the runCommand output under properties.output.value[].
+            const QJsonArray outputs = body.value("properties").toObject()
+                                           .value("output").toObject()
+                                           .value("value").toArray();
+            QString outputText;
+            for (const QJsonValue &v : outputs) {
+                const QJsonObject out = v.toObject();
+                outputText += QString("[%1]\n%2\n").arg(out.value("code").toString(),
+                                                         out.value("message").toString());
+            }
+            if (outputText.isEmpty()) outputText = "Command executed (no output).";
+            outputArea->setText(outputText);
+            appendLog("[+] Command executed successfully", "green");
+            return;
+        }
+
+        // Failed / Canceled / anything else - surface the error block if present.
+        const QJsonObject err = body.value("error").toObject();
+        const QString code = err.value("code").toString();
+        const QString msg  = err.value("message").toString();
+        const QString rendered = code.isEmpty() && msg.isEmpty()
+            ? QString("runCommand ended with status: %1").arg(status)
+            : QString("[%1] %2").arg(code, msg);
+        appendLog(QString("[-] %1").arg(rendered), "red");
+        outputArea->setText(rendered);
     });
 }
 
