@@ -214,6 +214,7 @@ void DashboardWindow::initUI()
     // === Discovery menu ===
     QAction *actionWhoAmI            = discoveryMenu->addAction("WhoAmI (Entra / Azure)");
     QAction *actionGatherAll         = discoveryMenu->addAction("Gather All (Bulk Enum)");
+    QAction *actionTenantSearch      = discoveryMenu->addAction("Tenant Search (Files / Mail / Chat)");
     QAction *actionMagicAppFinder    = discoveryMenu->addAction("Magic App Finder");
     discoveryMenu->addSeparator();
     QAction *actionAzureEnum         = discoveryMenu->addAction("Subscriptions && Resources");
@@ -235,6 +236,7 @@ void DashboardWindow::initUI()
 
     connect(actionWhoAmI,            &QAction::triggered, this, &DashboardWindow::openWhoAmIWindow);
     connect(actionGatherAll,         &QAction::triggered, this, &DashboardWindow::openGatherAllWindow);
+    connect(actionTenantSearch,      &QAction::triggered, this, &DashboardWindow::openTenantSearchWindow);
     connect(actionMagicAppFinder,    &QAction::triggered, this, &DashboardWindow::openMagicAppFinder);
     connect(actionAzureEnum,         &QAction::triggered, this, &DashboardWindow::openAzureEnumWindow);
     connect(actionConditionalAccess, &QAction::triggered, this, &DashboardWindow::openConditionalAccessWindow);
@@ -1693,6 +1695,12 @@ void DashboardWindow::openRunbookExplorer() {
 void DashboardWindow::openSPNEnumWindow() {
     auto *win = WindowFactory::createSPNEnumWindow();
     WindowHelper::setupWindow(win, this, 900, 700, 700, 500);
+    win->show();
+}
+
+void DashboardWindow::openTenantSearchWindow() {
+    auto *win = WindowFactory::createTenantSearchWindow();
+    WindowHelper::setupWindow(win, this, 1100, 720, 800, 500);
     win->show();
 }
 

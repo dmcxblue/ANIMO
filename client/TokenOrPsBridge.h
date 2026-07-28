@@ -43,12 +43,14 @@ public:
                                         const QString &error)>;
 
     struct Request {
-        QString sessionId;         // which session to run under
-        QString resource;          // e.g. https://graph.microsoft.com
-        QString httpUrl;           // e.g. https://graph.microsoft.com/v1.0/servicePrincipals
-        QString psScript;          // e.g. Get-AzADServicePrincipal
-        int     psDepth = 8;       // ConvertTo-Json -Depth
-        bool    psWrap  = true;    // wrap script with @() | ConvertTo-Json
+        QString    sessionId;         // which session to run under
+        QString    resource;          // e.g. https://graph.microsoft.com
+        QString    httpUrl;           // e.g. https://graph.microsoft.com/v1.0/servicePrincipals
+        QString    httpMethod = QStringLiteral("GET");  // "GET" or "POST" (default GET)
+        QByteArray httpBody;          // JSON body when httpMethod == "POST"
+        QString    psScript;          // e.g. Get-AzADServicePrincipal
+        int        psDepth = 8;       // ConvertTo-Json -Depth
+        bool       psWrap  = true;    // wrap script with @() | ConvertTo-Json
     };
 
     // Fire the fetch. `context` is a QObject that outlives the callback

@@ -19,19 +19,25 @@ struct HttpCtx {
     ~HttpCtx() { if (nam) nam->deleteLater(); }
 };
 
-// Do the GET with `token`. On success, parse JSON and hand off. On any HTTP
+// Issue the HTTP request with `token`. Uses req.httpMethod (default GET) and
+// req.httpBody when POSTing. On success, parse JSON and hand off. On any HTTP
 // or parse failure, invoke the PS fallback.
-void doHttpGet(QObject *context,
-               const QString &sessionId,
-               const QString &token,
-               const TokenOrPsBridge::Request &req,
-               TokenOrPsBridge::Callback cb) {
+void doHttpRequest(QObject *context,
+                   const QString &sessionId,
+                   const QString &token,
+                   const TokenOrPsBridge::Request &req,
+                   TokenOrPsBridge::Callback cb) {
     auto ctx = std::make_shared<HttpCtx>();
     ctx->nam = new QNetworkAccessManager();
     ctx->nam->moveToThread(QCoreApplication::instance()->thread());
 
     QNetworkRequest netReq = NetworkHelper::createBearerRequest(req.httpUrl, token);
-    QNetworkReply *reply = ctx->nam->get(netReq);
+    QNetworkReply *reply = nullptr;
+    if (req.httpMethod.compare(QStringLiteral("POST"), Qt::CaseInsensitive) == 0) {
+        reply = ctx->nam->post(netReq, req.httpBody);
+    } else {
+        reply = ctx->nam->get(netReq);
+    }
     if (!reply) {
         cb(false, QJsonValue(), QStringLiteral("error"),
            QStringLiteral("failed to issue HTTP request"));
@@ -109,7 +115,7 @@ void TokenOrPsBridge::fetch(QObject *context, const Request &req, Callback cb) {
     // Tier 1: existing valid token for this session + resource
     const QString existing = TokenHelper::instance()->getExistingTokenForSession(req.resource, req.sessionId);
     if (!existing.isEmpty() && !req.httpUrl.isEmpty()) {
-        doHttpGet(context, req.sessionId, existing, req, cb);
+        doHttpRequest(context, req.sessionId, existing, req, cb);
         return;
     }
 
@@ -121,7 +127,7 @@ void TokenOrPsBridge::fetch(QObject *context, const Request &req, Callback cb) {
             req.resource,
             [context, req, cb](bool ok, const QString &token, const QString &err) {
                 if (ok && !token.isEmpty()) {
-                    doHttpGet(context, req.sessionId, token, req, cb);
+                    doHttpRequest(context, req.sessionId, token, req, cb);
                 } else {
                     // Tier 4: fall back to PS. This is the path that saves
                     // cert-based SPNs, managed identity, or any session where

@@ -30,6 +30,7 @@
 #include "FunctionAppExplorerWindow.h"
 #include "LogicAppsViewerWindow.h"
 #include "WhoAmIWindow.h"
+#include "TenantSearchWindow.h"
 
 // Attack windows
 #include "MSOLSprayWindow.h"
@@ -156,6 +157,10 @@ QWidget* WindowFactory::createLogicAppsViewerWindow(QWidget *parent) {
 
 QWidget* WindowFactory::createWhoAmIWindow(QWidget *parent) {
     return new WhoAmIWindow(parent);
+}
+
+QWidget* WindowFactory::createTenantSearchWindow(QWidget *parent) {
+    return new TenantSearchWindow(parent);
 }
 
 // ============================================================================

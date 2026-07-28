@@ -150,6 +150,7 @@ public slots:
     void openFunctionAppExplorer();
     void openLogicAppsViewer();
     void openWhoAmIWindow();
+    void openTenantSearchWindow();
 
     // Persistence features
     void openEmailRulesWindow();
