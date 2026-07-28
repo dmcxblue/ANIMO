@@ -1,5 +1,6 @@
 #include "AddAzADAppSecret.h"
 #include "NetworkHelper.h"
+#include "UserSelectorWidget.h"
 #include <QByteArray>
 #include <QDebug>
 #include <QJsonArray>
@@ -24,9 +25,16 @@ AddAzADAppSecret::AddAzADAppSecret(QWidget *parent)
 
     QVBoxLayout *layout = new QVBoxLayout();
 
+    // Seamless token acquisition: pick a session, auto-fetch its Graph token.
+    userSelector = new UserSelectorWidget(this);
+    layout->addWidget(userSelector);
+    autoFetchBtn = new QPushButton("Auto-Fetch Graph Token for Selected User");
+    connect(autoFetchBtn, &QPushButton::clicked, this, &AddAzADAppSecret::autoFetchTokens);
+    layout->addWidget(autoFetchBtn);
+
     layout->addWidget(new QLabel("Access Token (Microsoft Graph):"));
     tokenInput = new QLineEdit();
-    tokenInput->setPlaceholderText("Paste Graph Access Token here...");
+    tokenInput->setPlaceholderText("Auto-filled from the selected session, or paste a Graph token...");
     layout->addWidget(tokenInput);
 
     startButton = new QPushButton("Add Secrets to Applications");
@@ -39,6 +47,26 @@ AddAzADAppSecret::AddAzADAppSecret(QWidget *parent)
     layout->addWidget(outputBox);
 
     this->setLayout(layout);
+}
+
+// ----------------------------------
+// Seamless: fetch the selected session's Graph token
+// ----------------------------------
+void AddAzADAppSecret::autoFetchTokens() {
+    if (!userSelector->hasSelection()) {
+        log("[-] Please select a user/session first");
+        return;
+    }
+    log("[*] Fetching Graph token for selected user...");
+    userSelector->fetchToken("https://graph.microsoft.com",
+        [this](bool success, const QString &token, const QString &error) {
+            if (success) {
+                tokenInput->setText(token);
+                log("[+] Graph token acquired");
+            } else {
+                log(QString("[-] Failed to fetch token: %1").arg(error));
+            }
+        });
 }
 
 // ----------------------------------

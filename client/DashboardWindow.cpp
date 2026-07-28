@@ -16,6 +16,8 @@
 #include "SessionExportWindow.h"
 #include "SessionImportWindow.h"
 #include "ReportDialog.h"
+#include "ActivityWindow.h"
+#include "StyleManager.h"
 #include "MagicAppFinderWindow.h"
 #include "RefreshTokenSprayWindow.h"
 #include "GatherAllWindow.h"
@@ -117,6 +119,12 @@ void DashboardWindow::initUI()
     QMenuBar *menuBar = new QMenuBar(this);
     outerLayout->addWidget(menuBar);
 
+    // Logged-in operator, shown top-right in that operator's color.
+    operatorChip_ = new QLabel(this);
+    operatorChip_->setTextFormat(Qt::RichText);
+    operatorChip_->setContentsMargins(0, 0, 12, 0);
+    menuBar->setCornerWidget(operatorChip_, Qt::TopRightCorner);
+
     // ============================================================
     // Menu Structure
     // ============================================================
@@ -127,6 +135,8 @@ void DashboardWindow::initUI()
     QMenu *discoveryMenu     = menuBar->addMenu("Discovery");
     QMenu *collectionMenu    = menuBar->addMenu("Collection");
     QMenu *persistenceMenu   = menuBar->addMenu("Persistence");
+    // Top-level clickable entry (not a sub-menu item) - opens the Post-Exploitation tools.
+    menuBar->addAction("Post-Exploitation", this, &DashboardWindow::openPostExploitWindow);
     QMenu *logsMenu          = menuBar->addMenu("Logs");
     QMenu *helpMenu          = menuBar->addMenu("Help");
 
@@ -202,6 +212,7 @@ void DashboardWindow::initUI()
     connect(actionAddAppSecret,      &QAction::triggered, this, &DashboardWindow::openAttackAppSecret);
 
     // === Discovery menu ===
+    QAction *actionWhoAmI            = discoveryMenu->addAction("WhoAmI (Entra / Azure)");
     QAction *actionGatherAll         = discoveryMenu->addAction("Gather All (Bulk Enum)");
     QAction *actionMagicAppFinder    = discoveryMenu->addAction("Magic App Finder");
     discoveryMenu->addSeparator();
@@ -222,6 +233,7 @@ void DashboardWindow::initUI()
     QAction *actionFunctionApps      = discoveryMenu->addAction("Function Apps");
     QAction *actionLogicApps         = discoveryMenu->addAction("Logic Apps");
 
+    connect(actionWhoAmI,            &QAction::triggered, this, &DashboardWindow::openWhoAmIWindow);
     connect(actionGatherAll,         &QAction::triggered, this, &DashboardWindow::openGatherAllWindow);
     connect(actionMagicAppFinder,    &QAction::triggered, this, &DashboardWindow::openMagicAppFinder);
     connect(actionAzureEnum,         &QAction::triggered, this, &DashboardWindow::openAzureEnumWindow);
@@ -254,11 +266,9 @@ void DashboardWindow::initUI()
     connect(actionAzureStorage,        &QAction::triggered, this, &DashboardWindow::openAzureStorageWindow);
 
     // === Persistence menu ===
-    QAction *actionPostExploit       = persistenceMenu->addAction("Post-Exploitation Tools");
     QAction *actionEmailRules        = persistenceMenu->addAction("Email Inbox Rules");
     QAction *actionConsentManip      = persistenceMenu->addAction("Consent Manipulation");
     QAction *actionWfh               = persistenceMenu->addAction("Windows Hello Attack");
-    connect(actionPostExploit,  &QAction::triggered, this, &DashboardWindow::openPostExploitWindow);
     connect(actionEmailRules,   &QAction::triggered, this, &DashboardWindow::openEmailRulesWindow);
     connect(actionConsentManip, &QAction::triggered, this, &DashboardWindow::openConsentManipulationWindow);
     connect(actionWfh,          &QAction::triggered, this, &DashboardWindow::openAttackWfh);
@@ -266,6 +276,9 @@ void DashboardWindow::initUI()
     // === Logs menu ===
     QAction *tokenLogsAction = logsMenu->addAction("Token Logs");
     connect(tokenLogsAction, &QAction::triggered, this, &DashboardWindow::openTokenLogWindow);
+
+    QAction *activityAction = logsMenu->addAction("Activity Log");
+    connect(activityAction, &QAction::triggered, this, &DashboardWindow::openActivityWindow);
 
     QAction *tokenAnalysisAction = logsMenu->addAction("Token Lifetime Analysis");
     connect(tokenAnalysisAction, &QAction::triggered, this, &DashboardWindow::openTokenAnalysisWindow);
@@ -277,16 +290,19 @@ void DashboardWindow::initUI()
     helpMenu->addSeparator();
     QAction *generateReportAction = helpMenu->addAction("Generate Engagement Report");
     connect(generateReportAction, &QAction::triggered, this, &DashboardWindow::openReportDialog);
-    
 
     // ── Main grid ──
     QGridLayout *mainLayout = new QGridLayout();
     mainLayout->setContentsMargins(5,5,5,5);
     mainLayout->setSpacing(10);
+    // Give the session table more room, but leave the event log enough width
+    // to show a reasonable line of text without wrapping mid-word.
+    mainLayout->setColumnStretch(0, 2);
+    mainLayout->setColumnStretch(1, 1);
 
     // ── Active Sessions ──
-    sessionTable = new QTableWidget(0, 6, this);
-    sessionTable->setHorizontalHeaderLabels({"Session ID", "User", "TenantID", "Default Domain", "Resource", "Token Expiry"});
+    sessionTable = new QTableWidget(0, 7, this);
+    sessionTable->setHorizontalHeaderLabels({"Session ID", "User", "TenantID", "Default Domain", "Resource", "Token Expiry", "Created By"});
     sessionTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     sessionTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     sessionTable->setSelectionMode(QAbstractItemView::ExtendedSelection);  // Enable Shift+Click, Ctrl+Click
@@ -295,8 +311,19 @@ void DashboardWindow::initUI()
     sessionTable->setSortingEnabled(true);
 
     QHeaderView *header = sessionTable->horizontalHeader();
-    header->setStretchLastSection(false);
-    header->setSectionResizeMode(QHeaderView::Stretch);
+    // Interactive mode: columns can be dragged AND we don't pay Qt's ResizeToContents
+    // tax on every paint. ResizeToContents combined with the 1-second expiryUpdateTimer
+    // starved the Qt event loop of socket-read events and made command output appear
+    // to vanish. Auto-sizing is done ONCE via resizeColumnsToContents() after row
+    // mutations (see addSessionRow / list-ok handler / updateExpiryDisplay).
+    header->setSectionResizeMode(QHeaderView::Interactive);
+    header->setStretchLastSection(true);
+    header->setMinimumSectionSize(60);
+    {
+        // Reasonable defaults so first paint isn't a mess before content lands.
+        const int widths[] = {90, 190, 260, 150, 230, 110, 100};
+        for (int i = 0; i < 7; ++i) sessionTable->setColumnWidth(i, widths[i]);
+    }
 
     connect(sessionTable, &QTableWidget::cellDoubleClicked, this, &DashboardWindow::openUserSessionTab);
     sessionTable->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -324,7 +351,7 @@ void DashboardWindow::initUI()
     connect(tabs, &QTabWidget::tabCloseRequested,
             this, &DashboardWindow::closeSessionTab);
 
-    // Add widgets to grid
+    // Original grid layout: sessions + event log on top, tabs spanning below.
     mainLayout->addWidget(sessionGroup, 0, 0);
     mainLayout->addWidget(eventGroup,   0, 1);
     mainLayout->addWidget(tabs,         1, 0, 1, 2);
@@ -461,7 +488,7 @@ void DashboardWindow::removeSessionById(const QString &sessionId) {
     logEvent(QString("[-] Session removed: %1").arg(sessionId));
 }
 
-void DashboardWindow::addSessionRow(const QString &sessionId, const QString &username, const QString &tenantId, const QString &domain, const QString &resource, const QDateTime &expiry)
+void DashboardWindow::addSessionRow(const QString &sessionId, const QString &username, const QString &tenantId, const QString &domain, const QString &resource, const QDateTime &expiry, const QString &createdBy)
 {
     if (!sessionTable) return;
 
@@ -489,6 +516,11 @@ void DashboardWindow::addSessionRow(const QString &sessionId, const QString &use
             sessionTable->setItem(row, 3, centeredItem(domain.isEmpty() ? "N/A" : domain));
             sessionTable->setItem(row, 4, centeredItem(resource.isEmpty() ? "N/A" : resource));
             sessionTable->setItem(row, 5, centeredItem(expiryText));
+            if (!createdBy.isEmpty()) {
+                auto *byItem = centeredItem(createdBy);
+                byItem->setForeground(StyleManager::colorForOperator(createdBy));
+                sessionTable->setItem(row, 6, byItem);
+            }
             return;
         }
     }
@@ -506,8 +538,17 @@ void DashboardWindow::addSessionRow(const QString &sessionId, const QString &use
     sessionTable->setItem(row, 3, centeredItem(domain.isEmpty() ? "N/A" : domain));
     sessionTable->setItem(row, 4, centeredItem(resource.isEmpty() ? "N/A" : resource));
     sessionTable->setItem(row, 5, centeredItem(expiryText));
+    {
+        auto *byItem = centeredItem(createdBy.isEmpty() ? "-" : createdBy);
+        byItem->setForeground(StyleManager::colorForOperator(createdBy));
+        sessionTable->setItem(row, 6, byItem);
+    }
 
     sessionTable->setSortingEnabled(true);
+    // One-shot autosize whenever a row is added or updated. Cheaper than
+    // ResizeToContents mode (which runs every paint) and gives the same
+    // "columns fit their data" behavior the user asked for.
+    sessionTable->resizeColumnsToContents();
 }
 
 
@@ -563,7 +604,7 @@ void DashboardWindow::openUserSessionTab(int row, int /*column*/) {
         }
     }
 
-    // No existing tab — ask the server for canonical info (+ ensure proc & subscribe)
+    // No existing tab - ask the server for canonical info (+ ensure proc & subscribe)
     if (!transport) {
         if (eventLog) eventLog->append("[-] No transport: cannot open session.");
         return;
@@ -636,7 +677,7 @@ void DashboardWindow::showSessionContextMenu(const QPoint &pos) {
 
     contextMenu.addSeparator();
 
-    // Migrate To submenu — create new session for a different resource
+    // Migrate To submenu - create new session for a different resource
     QMenu *migrateMenu = contextMenu.addMenu("Migrate To...");
     migrateMenu->setIcon(QIcon::fromTheme("network-connect"));
 
@@ -892,6 +933,12 @@ void DashboardWindow::openTokenLogWindow() {
     win->show();
 }
 
+void DashboardWindow::openActivityWindow() {
+    auto *win = new ActivityWindow();
+    WindowHelper::setupWindow(win, this, 950, 600, 700, 400);
+    win->show();
+}
+
 void DashboardWindow::openTokenAnalysisWindow() {
     auto *win = WindowFactory::createTokenAnalysisWindow();
     WindowHelper::setupWindow(win, this, 900, 700, 800, 500);
@@ -955,7 +1002,9 @@ void DashboardWindow::openCrossTenantAccessWindow() {
 
 void DashboardWindow::openAzureStorageWindow() {
     auto *win = WindowFactory::createAzureStorageWindow();
-    WindowHelper::setupWindow(win, this, 900, 600, 700, 450);
+    // persistGeometry=false: always open at a sane size. A previously-maximized
+    // state was being restored every time, so the window opened huge.
+    WindowHelper::setupWindow(win, this, 1000, 680, 700, 450, false);
     win->show();
 }
 
@@ -981,6 +1030,37 @@ void DashboardWindow::onServerJson(const QJsonObject &obj)
 {
     const QString status  = obj.value("status").toString();
     const QString message = obj.value("message").toString();
+    const QString action  = obj.value("action").toString();
+
+    // 0) Live session table updates so the operator doesn't need F5.
+    //
+    // Server broadcasts `action="session_created"` from the LOGIN_OK marker
+    // handler once auth completes, and `action="session_exited"` when the
+    // pwsh process dies. Add/refresh/mark the corresponding row in place.
+    if (action == QLatin1String("session_created")) {
+        const QString sid  = obj.value("sessionId").toString();
+        const QString user = obj.value("user").toString("Unknown");
+        const QString dom  = obj.value("domain").toString("N/A");
+        const QString ten  = obj.value("tenantId").toString("N/A");
+        const QString res  = obj.value("resource").toString("https://management.azure.com");
+        if (!sid.isEmpty()) {
+            // addSessionRow dedupes on sessionId, so this both adds new rows
+            // and refreshes existing ones without a full table rebuild.
+            addSessionRow(sid, user, ten, dom, res, QDateTime());
+        }
+        return;
+    }
+    if (action == QLatin1String("session_exited")) {
+        const QString sid = obj.value("sessionId").toString();
+        const bool crashed = obj.value("crashed").toBool(false);
+        if (!sid.isEmpty() && eventLog) {
+            eventLog->append(QString("[!] Session %1 %2")
+                                 .arg(sid.left(8), crashed ? "crashed" : "exited"));
+        }
+        // Leave the row visible (operator may want to inspect history);
+        // expiry column already colors expired tokens red.
+        return;
+    }
 
     // 1) Open/focus a session tab (server ensures proc + subscribes)
     if (status == QLatin1String("ok") && message == QLatin1String("session_info")) {
@@ -1046,6 +1126,16 @@ void DashboardWindow::onServerJson(const QJsonObject &obj)
         const int idx = tabs->addTab(tab, title);
         tabs->setCurrentIndex(idx);
 
+        // Live "running" badge in the tab title so the operator can tell at a
+        // glance which tab is busy with a command. Uses a stable base title
+        // (`title` captured above) so multiple state transitions don't drift.
+        connect(tab, &DashboardTab::runningStateChanged, this,
+                [this, tab, title](bool running) {
+            const int i = tabs->indexOf(tab);
+            if (i < 0) return;
+            tabs->setTabText(i, running ? (title + QStringLiteral(" ⏳")) : title);
+        });
+
         //if (eventLog) eventLog->append(QString("[+] Opened tab for %1 (alive=%2, status=%3)").arg(sid.left(8)).arg(alive ? "true" : "false").arg(sstatus));
         return;
     }
@@ -1058,14 +1148,65 @@ void DashboardWindow::onServerJson(const QJsonObject &obj)
             sessionTable->setRowCount(0);
         }
 
+        // If a DB row has placeholder values (Unknown / N/A / "") but TokenStore
+        // has better data (parsed from the JWT after auto-restore or fresh login),
+        // display the TokenStore values and also push them back to the server so
+        // the DB row heals. This fixes sessions that were created before the
+        // server started upserting real identity into the main sessions.db.
+        const auto isPlaceholder = [](const QString &v) {
+            return v.isEmpty() || v == QLatin1String("Unknown") || v == QLatin1String("N/A");
+        };
+
         for (const QJsonValue &v : rows) {
             const QJsonObject row = v.toObject();
             const QString sid     = row.value("sessionId").toString();
-            const QString user    = row.value("user").toString();
-            const QString ten     = row.value("tenantId").toString();
-            const QString dom     = row.value("domain").toString();
+            QString user          = row.value("user").toString();
+            QString ten           = row.value("tenantId").toString();
+            QString dom           = row.value("domain").toString();
             const QString res     = row.value("resource").toString("https://management.azure.com");
-            addSessionRow(sid, user, ten, dom, res);
+            const QString creator = row.value("createdBy").toString();
+
+            // Override with TokenStore data when DB is stale.
+            bool corrected = false;
+            if (!sid.isEmpty()) {
+                const TokenInfo t = TokenStore::instance()->getTokenForSession(sid);
+                if (t.isValid()) {
+                    if (isPlaceholder(user) && !t.upn.isEmpty()) {
+                        user = t.upn;
+                        corrected = true;
+                    }
+                    if (isPlaceholder(ten)  && !t.tenantId.isEmpty()) {
+                        ten  = t.tenantId;
+                        corrected = true;
+                    }
+                    if (isPlaceholder(dom)  && user.contains('@')) {
+                        dom  = user.section('@', 1, 1);
+                        corrected = true;
+                    }
+                }
+            }
+
+            addSessionRow(sid, user, ten, dom, res, QDateTime(), creator);
+
+            // Register in TokenStore so plugin windows (UserSelectorWidget) can find it
+            if (!sid.isEmpty() && !TokenStore::instance()->hasSession(sid)) {
+                TokenInfo info;
+                info.upn      = user;
+                info.tenantId = ten;
+                info.resource = res;
+                TokenStore::instance()->storeToken(sid, info);
+            }
+
+            // Heal the server's DB row so this override isn't needed next time.
+            if (corrected && transport) {
+                QJsonObject up;
+                up.insert(Protocol::F_ACTION, QStringLiteral("update_session_meta"));
+                up.insert("sessionId", sid);
+                up.insert("user",      user);
+                up.insert("tenantId",  ten);
+                up.insert("domain",    dom);
+                transport->sendJson(up);
+            }
         }
 
         if (sessionTable) sessionTable->setSortingEnabled(true);
@@ -1108,6 +1249,16 @@ void DashboardWindow::onServerJson(const QJsonObject &obj)
 // -----------------------------------------------------------------------------
 // Runtime injection of transport, with robust connects and initial list request
 // -----------------------------------------------------------------------------
+void DashboardWindow::setOperator(const QString &op)
+{
+    if (!operatorChip_) return;
+    const QColor c = StyleManager::colorForOperator(op);
+    operatorChip_->setText(
+        QString("<span style='color:#8a8a8a'>operator </span>"
+                "<span style='color:%1; font-weight:bold'>%2</span>")
+            .arg(c.name(), op.toHtmlEscaped()));
+}
+
 void DashboardWindow::setTransport(ClientTransport* t)
 {
     // If we already had a transport, disconnect its signals first
@@ -1336,14 +1487,22 @@ void DashboardWindow::updateExpiryDisplay() {
             expiryItem->setForeground(QColor(220, 53, 69));  // Red
             expiryItem->setToolTip("Token has expired");
 
-            // Auto-renew if enabled
+            // Auto-renew if enabled. Reactive fallback: proactive path below
+            // usually already ran, but if it failed (transient network) we
+            // still try here so the session self-heals.
             if (autoRenewEnabled && tokenExp.autoRenewEnabled && !tokenExp.refreshToken.isEmpty()) {
                 refreshTokenForSession(sessionId);
             }
         } else if (secsRemaining < 300) {
-            // Less than 5 minutes - orange/warning
+            // Less than 5 minutes - orange/warning + PROACTIVE refresh so the
+            // terminal's Az context is renewed before the current token dies.
+            // Otherwise commands issued between expiry and the reactive refresh
+            // above would fail with 401 (that's the whole reported bug).
             expiryItem->setForeground(QColor(255, 193, 7));  // Warning yellow
-            expiryItem->setToolTip("Token expiring soon!");
+            expiryItem->setToolTip("Token expiring soon - auto-refreshing");
+            if (autoRenewEnabled && tokenExp.autoRenewEnabled && !tokenExp.refreshToken.isEmpty()) {
+                refreshTokenForSession(sessionId);
+            }
         } else if (secsRemaining < 900) {
             // Less than 15 minutes - yellow
             expiryItem->setForeground(QColor(255, 193, 7));
@@ -1451,6 +1610,55 @@ void DashboardWindow::refreshTokenForSession(const QString &sessionId) {
         setSessionTokenExpiry(sessionId, newAccessToken, effectiveRefresh, resource, tenantId);
 
         logEvent(QString("[+] Auto-renewed token for session %1").arg(sessionId.left(8)));
+
+        // WS5: also refresh the terminal's injected Az/Mg tokens (server no-ops
+        // this for full/live sessions, so it's safe to always attempt).
+        reinjectTerminalTokens(sessionId, newAccessToken, effectiveRefresh, tenantId);
+    });
+}
+
+void DashboardWindow::reinjectTerminalTokens(const QString &sessionId, const QString &armToken,
+                                             const QString &refreshToken, const QString &tenantId) {
+    if (!transport || refreshToken.isEmpty() || armToken.isEmpty()) return;
+
+    auto *nam = new QNetworkAccessManager(this);
+    const QString tenant = tenantId.isEmpty() ? QStringLiteral("organizations") : tenantId;
+
+    auto mint = [this, nam, refreshToken, tenant](const QString &scope,
+                                                  std::function<void(QString)> cb) {
+        QUrl url(QString("https://login.microsoftonline.com/%1/oauth2/v2.0/token").arg(tenant));
+        QNetworkRequest req{url};
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        NetworkHelper::setRequestTimeout(req);
+        QUrlQuery form;
+        form.addQueryItem("client_id", "1950a258-227b-4e31-a9cf-717495945fc2");
+        form.addQueryItem("grant_type", "refresh_token");
+        form.addQueryItem("refresh_token", refreshToken);
+        form.addQueryItem("scope", scope);
+        QNetworkReply *r = nam->post(req, form.query(QUrl::FullyEncoded).toUtf8());
+        if (!r) { cb(QString()); return; }
+        connect(r, &QNetworkReply::finished, this, [r, cb]() {
+            r->deleteLater();
+            QString t;
+            if (r->error() == QNetworkReply::NoError)
+                t = QJsonDocument::fromJson(r->readAll()).object().value("access_token").toString();
+            cb(t);
+        });
+    };
+
+    // Mint Graph, then KeyVault, then push all three to the terminal context.
+    mint("https://graph.microsoft.com/.default", [this, nam, mint, sessionId, armToken, tenantId](QString graph) {
+        mint("https://vault.azure.net/.default", [this, nam, sessionId, armToken, tenantId, graph](QString kv) {
+            QJsonObject req;
+            req.insert(Protocol::F_ACTION, QStringLiteral("reinject_tokens"));
+            req.insert("sessionId", sessionId);
+            req.insert("accessToken", armToken);
+            if (!graph.isEmpty())    req.insert("graphToken", graph);
+            if (!kv.isEmpty())       req.insert("keyVaultToken", kv);
+            if (!tenantId.isEmpty()) req.insert("tenantId", tenantId);
+            if (transport) transport->sendJson(req);
+            nam->deleteLater();
+        });
     });
 }
 
@@ -1497,6 +1705,12 @@ void DashboardWindow::openFunctionAppExplorer() {
 void DashboardWindow::openLogicAppsViewer() {
     auto *win = WindowFactory::createLogicAppsViewerWindow();
     WindowHelper::setupWindow(win, this, 900, 700, 700, 500);
+    win->show();
+}
+
+void DashboardWindow::openWhoAmIWindow() {
+    auto *win = WindowFactory::createWhoAmIWindow();
+    WindowHelper::setupWindow(win, this, 1200, 800, 900, 600);
     win->show();
 }
 
@@ -1664,11 +1878,16 @@ void DashboardWindow::migrateSession(const QString &sourceSessionId, const QStri
     logEvent(QString("[*] Migrating session %1 (%2) to %3...")
              .arg(sourceSessionId.left(8), username, label));
 
-    // Look for a refresh token from this session or user
+    // Use THIS session's own refresh token (not just any token for the user - the same
+    // user can own several sessions with different tokens). Fall back to a by-user
+    // lookup only if the source session has none of its own.
     QString refreshToken, rtTenantId, rtUpn;
-    bool hasRT = TokenHelper::instance()->getBestRefreshToken(refreshToken, rtTenantId, rtUpn, username);
+    bool hasRT = TokenHelper::instance()->getRefreshTokenForSession(sourceSessionId, refreshToken, rtTenantId, rtUpn);
     if (!hasRT) {
-        logEvent(QString("[-] No refresh token available for %1 — cannot migrate").arg(username));
+        hasRT = TokenHelper::instance()->getBestRefreshToken(refreshToken, rtTenantId, rtUpn, username);
+    }
+    if (!hasRT) {
+        logEvent(QString("[-] No refresh token available for %1 - cannot migrate").arg(username));
         QMessageBox::warning(this, "Migration Failed",
             QString("No refresh token is available for user '%1'.\n\n"
                     "Migration requires a refresh token to exchange for a new resource token. "

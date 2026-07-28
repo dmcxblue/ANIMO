@@ -4,6 +4,9 @@
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QScreen>
+#include <QFile>
+#include <QDateTime>
+#include <QMutex>
 
 #include "DashboardWindow.h"
 #include "ThemeManager.h"
@@ -14,10 +17,36 @@
 #include "../shared/Protocol.h"
 
 namespace {
+// Mirror every qDebug/qInfo/qWarning to /tmp/animo-cli-dbg.log so we don't
+// depend on the terminal or a tee. Same handler pattern as the server side.
+QFile *g_dbgLog = nullptr;
+QMutex g_dbgLogMutex;
+void animoClientMessageHandler(QtMsgType type, const QMessageLogContext &, const QString &msg) {
+    const char *lvl = "?";
+    switch (type) {
+        case QtDebugMsg:    lvl = "D"; break;
+        case QtInfoMsg:     lvl = "I"; break;
+        case QtWarningMsg:  lvl = "W"; break;
+        case QtCriticalMsg: lvl = "C"; break;
+        case QtFatalMsg:    lvl = "F"; break;
+    }
+    const QString line = QString("[%1] [%2] %3\n")
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs), lvl, msg);
+    fprintf(stderr, "%s", qUtf8Printable(line));
+    fflush(stderr);
+    QMutexLocker lk(&g_dbgLogMutex);
+    if (g_dbgLog && g_dbgLog->isOpen()) {
+        g_dbgLog->write(line.toUtf8());
+        g_dbgLog->flush();
+    }
+}
+} // namespace
+
+namespace {
 // Populate TokenStore from the server's Token Log so every plugin window's
 // UserSelectorWidget can see users whose tokens were captured in previous
 // sessions (webhook, PRT exchange, refresh-token exchange, imports, etc.).
-// One-shot — disconnects after the first "tokens retrieved" response.
+// One-shot - disconnects after the first "tokens retrieved" response.
 void bootstrapTokenStore(ClientTransport *transport, QObject *ownerScope) {
     auto conn = std::make_shared<QMetaObject::Connection>();
     *conn = QObject::connect(transport, &ClientTransport::messageReceived, ownerScope,
@@ -58,6 +87,11 @@ void bootstrapTokenStore(ClientTransport *transport, QObject *ownerScope) {
 
 int main(int argc, char *argv[])
 {
+    // Install log-to-file handler before Qt event loop so early qInfo lines land.
+    g_dbgLog = new QFile("/tmp/animo-cli-dbg.log");
+    g_dbgLog->open(QIODevice::WriteOnly | QIODevice::Truncate);
+    qInstallMessageHandler(animoClientMessageHandler);
+
     QApplication app(argc, argv);
 
     // Set application-wide icon (Azure cloud theme)
@@ -80,20 +114,27 @@ int main(int argc, char *argv[])
     // Transport lives for the app lifetime
     auto *transport = new ClientTransport(&app);           // parent to qApp
     transport->setObjectName(QStringLiteral("ClientTransport"));
+    // Auto-reconnect if the server restarts under us. Without this the operator
+    // has to close and reopen the client after every server restart. Reconnect
+    // uses the same credentials cached in the transport after the first successful
+    // login. Keep the retry cadence modest so a truly-dead server doesn't spin.
+    transport->setMaxReconnectAttempts(10);
+    transport->setReconnectDelay(3000);
+    transport->enableAutoReconnect(true);
 
     DashboardWindow *dashboard = nullptr;
 
     QObject::connect(&loginWin, &ServerLoginWindow::connectToServer,
-                     [&](const QString &ip, quint16 port, const QString &password) {
+                     [&](const QString &ip, quint16 port, const QString &username, const QString &password) {
         // Connect + authenticate (uses your ClientTransport helper)
-        const bool ok = transport->connectAndLogin(ip, port, password, /*timeoutMs=*/5000);
+        const bool ok = transport->connectAndLogin(ip, port, username, password, /*timeoutMs=*/5000);
         if (ok) {
             loginWin.close();
 
             // Create dashboard and inject transport BEFORE first use
             dashboard = new DashboardWindow();
             dashboard->setWindowFlags(Qt::Window);
-            dashboard->setWindowTitle("ANIMO - Azure Network Intel & Mission Ops");
+            dashboard->setWindowTitle(QString("ANIMO - Azure Network Intel & Mission Ops  -  operator: %1").arg(username));
             dashboard->setWindowIcon(appIcon);
             dashboard->setMinimumSize(800, 500);
             dashboard->resize(1100, 700);
@@ -104,6 +145,7 @@ int main(int argc, char *argv[])
             }
 
             dashboard->setTransport(transport);
+            dashboard->setOperator(username);
             dashboard->show();
 
             // Prime TokenStore with everything already in the server's

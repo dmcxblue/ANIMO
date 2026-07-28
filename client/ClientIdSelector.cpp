@@ -61,7 +61,7 @@ QString ClientIdSelector::currentClientId() const {
     if (data.isValid() && !data.toString().isEmpty()) {
         return data.toString();
     }
-    // 2) Free-text entry — extract a UUID from whatever the user typed.
+    // 2) Free-text entry - extract a UUID from whatever the user typed.
     return extractUuid(currentText());
 }
 
@@ -72,7 +72,7 @@ void ClientIdSelector::setClientId(const QString &clientId) {
             return;
         }
     }
-    // Not in the FOCI list — put it in the edit line as free text.
+    // Not in the FOCI list - put it in the edit line as free text.
     setEditText(clientId);
 }
 

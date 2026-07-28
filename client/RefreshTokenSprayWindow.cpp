@@ -157,7 +157,7 @@ void RefreshTokenSprayWindow::setupUi()
     auto *resultsLayout = new QVBoxLayout(resultsGroup);
 
     resultsTable = new QTableWidget(0, 4, this);
-    new TablePlaceholder(resultsTable, "No apps tested yet — start a spray.");
+    new TablePlaceholder(resultsTable, "No apps tested yet - start a spray.");
     resultsTable->setHorizontalHeaderLabels({"App Name", "App ID", "Status", "Scopes / Error"});
     resultsTable->horizontalHeader()->setStretchLastSection(true);
     resultsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -326,7 +326,7 @@ void RefreshTokenSprayWindow::sprayApp(const QString &appName, const QString &ap
         if (NetworkHelper::isThrottled(reply)) {
             int retryMs = NetworkHelper::getRetryAfterMs(reply);
             if (retryMs <= 0) retryMs = 5000;
-            appendLog(QString("[!] Throttled (429) on %1 — backing off %2s")
+            appendLog(QString("[!] Throttled (429) on %1 - backing off %2s")
                           .arg(appName).arg(retryMs / 1000.0, 0, 'f', 1), "#ffc107");
             sprayTimer->start(retryMs);   // don't advance the index; retry this app
             return;
@@ -381,7 +381,7 @@ void RefreshTokenSprayWindow::checkPrivileges(const QString &appName, const QStr
     const bool graphAud = aud.contains("graph.microsoft.com")
                           || aud == QLatin1String("00000003-0000-0000-c000-000000000000");
     if (!graphAud) {
-        appendLog(QString("    privileges: %1 token is not Graph-scoped (aud=%2) — skipped")
+        appendLog(QString("    privileges: %1 token is not Graph-scoped (aud=%2) - skipped")
                       .arg(appName, aud.isEmpty() ? QStringLiteral("unknown") : aud), "#888888");
         return;
     }

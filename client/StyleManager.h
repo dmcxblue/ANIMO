@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QPushButton>
+#include <QColor>
 
 /**
  * Centralized style definitions for consistent UI across all windows.
@@ -39,6 +40,16 @@ public:
     static QString vulnerableRowBackground();
     static QString protectedRowBackground();
     static QString highlightRowBackground();
+
+    // Operator / activity coloring (readable on the dark theme)
+    // A stable, distinct color per operator handle, so the same operator reads the
+    // same color everywhere (activity log, session table, token log).
+    static QColor colorForOperator(const QString &op);
+    // Semantic color for an audit-log action ("login", "run_command", ...).
+    static QColor colorForAuditAction(const QString &action);
+    // Semantic color for a token capture source, by technique family
+    // ("device_code_phishing", "webhook_access", "prt_token_exchange", ...).
+    static QColor colorForTokenSource(const QString &source);
 };
 
 #endif // STYLEMANAGER_H

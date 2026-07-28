@@ -15,6 +15,8 @@
 #include <QJsonDocument>
 #include <QUrlQuery>
 
+class UserSelectorWidget;
+
 class AddAzADAppSecret : public QWidget {
     Q_OBJECT
 
@@ -24,8 +26,11 @@ public:
 private slots:
     void startAttack();
     void handleListAppsReply();
+    void autoFetchTokens();
 
 private:
+    UserSelectorWidget *userSelector;
+    QPushButton *autoFetchBtn;
     QLineEdit *tokenInput;
     QPushButton *startButton;
     QTextEdit *outputBox;

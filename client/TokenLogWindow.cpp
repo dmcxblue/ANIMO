@@ -1,6 +1,7 @@
 #include "TokenLogWindow.h"
 #include "TablePlaceholder.h"
 #include "ClientTransport.h"
+#include "StyleManager.h"
 #include "../shared/Protocol.h"
 
 #include <QHeaderView>
@@ -48,8 +49,8 @@ void TokenLogWindow::setupUI()
     // Token table
     tokenTable = new QTableWidget(this);
     new TablePlaceholder(tokenTable, "No tokens logged yet.");
-    tokenTable->setColumnCount(6);
-    tokenTable->setHorizontalHeaderLabels({"ID", "Timestamp", "Source", "User (UPN)", "Tenant ID", "Resource (Audience)"});
+    tokenTable->setColumnCount(7);
+    tokenTable->setHorizontalHeaderLabels({"ID", "Timestamp", "Source", "User (UPN)", "Tenant ID", "Resource (Audience)", "Captured By"});
     tokenTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     tokenTable->setSelectionMode(QAbstractItemView::ExtendedSelection);  // Enable Shift+Click, Ctrl+Click
     tokenTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -173,10 +174,21 @@ void TokenLogWindow::loadTokens()
 
                             tokenTable->setItem(row, 0, new QTableWidgetItem(QString::number(token.value("id").toInt())));
                             tokenTable->setItem(row, 1, new QTableWidgetItem(token.value("timestamp").toString()));
-                            tokenTable->setItem(row, 2, new QTableWidgetItem(token.value("source").toString()));
+                            {
+                                const QString src = token.value("source").toString();
+                                auto *srcItem = new QTableWidgetItem(src);
+                                srcItem->setForeground(StyleManager::colorForTokenSource(src));
+                                tokenTable->setItem(row, 2, srcItem);
+                            }
                             tokenTable->setItem(row, 3, new QTableWidgetItem(upn));
                             tokenTable->setItem(row, 4, new QTableWidgetItem(tid));
                             tokenTable->setItem(row, 5, new QTableWidgetItem(aud));
+                            {
+                                const QString by = token.value("captured_by").toString();
+                                auto *byItem = new QTableWidgetItem(by);
+                                byItem->setForeground(StyleManager::colorForOperator(by));
+                                tokenTable->setItem(row, 6, byItem);
+                            }
                         }
                     }
                 });

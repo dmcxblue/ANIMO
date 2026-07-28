@@ -11,7 +11,8 @@ public:
     explicit ServerLoginWindow(QWidget *parent = nullptr);
 
 signals:
-    void connectToServer(const QString &ip, quint16 port, const QString &password);
+    void connectToServer(const QString &ip, quint16 port,
+                         const QString &username, const QString &password);
 
 private slots:
     void onConnectClicked();
@@ -19,6 +20,7 @@ private slots:
 private:
     QLineEdit *ipEdit_;
     QLineEdit *portEdit_;
+    QLineEdit *usernameEdit_;
     QLineEdit *passwordEdit_;
     QPushButton *connectButton_;
 };

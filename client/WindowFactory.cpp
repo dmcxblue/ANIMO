@@ -29,6 +29,7 @@
 #include "SPNEnumWindow.h"
 #include "FunctionAppExplorerWindow.h"
 #include "LogicAppsViewerWindow.h"
+#include "WhoAmIWindow.h"
 
 // Attack windows
 #include "MSOLSprayWindow.h"
@@ -151,6 +152,10 @@ QWidget* WindowFactory::createFunctionAppExplorerWindow(QWidget *parent) {
 
 QWidget* WindowFactory::createLogicAppsViewerWindow(QWidget *parent) {
     return new LogicAppsViewerWindow(parent);
+}
+
+QWidget* WindowFactory::createWhoAmIWindow(QWidget *parent) {
+    return new WhoAmIWindow(parent);
 }
 
 // ============================================================================

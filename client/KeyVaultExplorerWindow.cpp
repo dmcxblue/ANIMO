@@ -15,6 +15,7 @@
 #include <QJsonObject>
 #include <QClipboard>
 #include <QApplication>
+#include <QMenu>
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QTextStream>
@@ -159,6 +160,9 @@ void KeyVaultExplorerWindow::setupUi() {
     resultsTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
     resultsTree->setAlternatingRowColors(true);
     resultsTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    resultsTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(resultsTree, &QTreeWidget::customContextMenuRequested,
+            this, &KeyVaultExplorerWindow::showTreeContextMenu);
     splitter->addWidget(resultsTree);
 
     // Log output
@@ -354,7 +358,7 @@ void KeyVaultExplorerWindow::onVaultSelected(int index) {
 void KeyVaultExplorerWindow::listSecrets() {
     QString token = vaultTokenInput->text().trimmed();
     if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a Key Vault access token (https://vault.azure.net).");
+        ensureVaultToken([this](bool ok) { if (ok) listSecrets(); });
         return;
     }
 
@@ -395,6 +399,7 @@ void KeyVaultExplorerWindow::listSecrets() {
 
         appendLog(QString("[+] Found %1 secret(s)").arg(secrets.size()), "green");
 
+        removeTreeGroup("Secrets");   // refresh in place, don't duplicate
         auto *secretsGroup = new QTreeWidgetItem(resultsTree);
         secretsGroup->setText(0, "Secrets");
         secretsGroup->setText(1, QString("(%1 items)").arg(secrets.size()));
@@ -424,7 +429,7 @@ void KeyVaultExplorerWindow::listSecrets() {
 void KeyVaultExplorerWindow::listKeys() {
     QString token = vaultTokenInput->text().trimmed();
     if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a Key Vault access token.");
+        ensureVaultToken([this](bool ok) { if (ok) listKeys(); });
         return;
     }
 
@@ -465,6 +470,7 @@ void KeyVaultExplorerWindow::listKeys() {
 
         appendLog(QString("[+] Found %1 key(s)").arg(keys.size()), "green");
 
+        removeTreeGroup("Keys");   // refresh in place, don't duplicate
         auto *keysGroup = new QTreeWidgetItem(resultsTree);
         keysGroup->setText(0, "Keys");
         keysGroup->setText(1, QString("(%1 items)").arg(keys.size()));
@@ -489,7 +495,7 @@ void KeyVaultExplorerWindow::listKeys() {
 void KeyVaultExplorerWindow::listCertificates() {
     QString token = vaultTokenInput->text().trimmed();
     if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a Key Vault access token.");
+        ensureVaultToken([this](bool ok) { if (ok) listCertificates(); });
         return;
     }
 
@@ -530,6 +536,7 @@ void KeyVaultExplorerWindow::listCertificates() {
 
         appendLog(QString("[+] Found %1 certificate(s)").arg(certs.size()), "green");
 
+        removeTreeGroup("Certificates");   // refresh in place, don't duplicate
         auto *certsGroup = new QTreeWidgetItem(resultsTree);
         certsGroup->setText(0, "Certificates");
         certsGroup->setText(1, QString("(%1 items)").arg(certs.size()));
@@ -552,6 +559,91 @@ void KeyVaultExplorerWindow::listCertificates() {
     });
 }
 
+void KeyVaultExplorerWindow::removeTreeGroup(const QString &label) {
+    for (int i = resultsTree->topLevelItemCount() - 1; i >= 0; --i) {
+        QTreeWidgetItem *top = resultsTree->topLevelItem(i);
+        if (top && top->text(0) == label) {
+            delete resultsTree->takeTopLevelItem(i);
+        }
+    }
+}
+
+void KeyVaultExplorerWindow::showTreeContextMenu(const QPoint &pos) {
+    QTreeWidgetItem *item = resultsTree->itemAt(pos);
+    if (!item) return;
+    resultsTree->setCurrentItem(item);   // so the action operates on this item
+
+    const QString type = item->text(1);
+    QMenu menu(this);
+    if (type == "Secret") {
+        menu.addAction("Get Secret Value", this, &KeyVaultExplorerWindow::getSecretValue);
+    } else if (type == "Key") {
+        menu.addAction("Get Key (JWK)", this, &KeyVaultExplorerWindow::getKeyValue);
+    } else if (type == "Certificate") {
+        menu.addAction("Export Certificate", this, &KeyVaultExplorerWindow::exportCertificate);
+    }
+    if (!item->text(5).isEmpty()) {
+        menu.addAction("Copy ID/Value", this, [this, item]() {
+            QApplication::clipboard()->setText(item->text(5));
+            appendLog("[+] Copied to clipboard", "green");
+        });
+    }
+    if (!menu.isEmpty())
+        menu.exec(resultsTree->viewport()->mapToGlobal(pos));
+}
+
+void KeyVaultExplorerWindow::getKeyValue() {
+    auto *item = resultsTree->currentItem();
+    if (!item || item->text(1) != "Key") {
+        QMessageBox::warning(this, "No Selection", "Please select a key to retrieve.");
+        return;
+    }
+    QString token = vaultTokenInput->text().trimmed();
+    if (token.isEmpty()) {
+        ensureVaultToken([this](bool ok) { if (ok) getKeyValue(); });
+        return;
+    }
+
+    QString kid = item->text(5);
+    if (kid.isEmpty()) return;
+
+    setLoading(true);
+    appendLog(QString("[*] Retrieving key: %1").arg(item->text(0)), "cyan");
+
+    // GET the key -> returns its JWK (public material for RSA/EC; private material is
+    // non-exportable unless the key was created exportable).
+    QString url = kid.contains("?") ? kid : kid + "?api-version=7.4";
+    QNetworkReply *reply = net->get(bearerRequest(url, token));
+    if (!reply) {
+        appendLog("[-] Network request failed", "red");
+        setLoading(false);
+        return;
+    }
+    activeReplies.append(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, item]() {
+        activeReplies.removeAll(reply);
+        reply->deleteLater();
+        setLoading(false);
+
+        if (reply->error() != QNetworkReply::NoError) {
+            appendLog(QString("[-] %1").arg(NetworkHelper::parseApiError(reply)), "red");
+            return;
+        }
+
+        QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        QJsonObject jwk = obj.value("key").toObject();
+        QString jwkStr = QString::fromUtf8(QJsonDocument(jwk).toJson(QJsonDocument::Compact));
+        item->setText(5, jwkStr);
+
+        appendLog(QString("[+] Key '%1' (%2): %3")
+                      .arg(item->text(0), jwk.value("kty").toString(), jwkStr), "green");
+        QMessageBox::information(this, "Key (JWK)",
+            QString("Key: %1\nType: %2\n\nJWK:\n%3")
+                .arg(item->text(0), jwk.value("kty").toString(), jwkStr));
+    });
+}
+
 void KeyVaultExplorerWindow::getSecretValue() {
     auto *item = resultsTree->currentItem();
     if (!item || item->text(1) != "Secret") {
@@ -561,7 +653,7 @@ void KeyVaultExplorerWindow::getSecretValue() {
 
     QString token = vaultTokenInput->text().trimmed();
     if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a Key Vault access token.");
+        ensureVaultToken([this](bool ok) { if (ok) getSecretValue(); });
         return;
     }
 
@@ -612,7 +704,7 @@ void KeyVaultExplorerWindow::exportCertificate() {
 
     QString token = vaultTokenInput->text().trimmed();
     if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a Key Vault access token.");
+        ensureVaultToken([this](bool ok) { if (ok) exportCertificate(); });
         return;
     }
 
@@ -880,6 +972,10 @@ void KeyVaultExplorerWindow::onUserChanged(const QString &upn) {
     if (!vaultToken.isEmpty()) {
         vaultTokenInput->setText(vaultToken);
         appendLog("Found existing Key Vault token", "lime");
+    } else {
+        // No cached vault token - mint one from the session's refresh token now,
+        // so operations don't have to stop and ask for it.
+        ensureVaultToken();
     }
 
     updateTokenStatus();
@@ -928,6 +1024,34 @@ void KeyVaultExplorerWindow::autoFetchTokens() {
 
             if (!error.isEmpty()) {
                 appendLog("Some tokens failed: " + error, "orange");
+            }
+        });
+}
+
+void KeyVaultExplorerWindow::ensureVaultToken(std::function<void(bool)> then) {
+    // Already have a vault-audience token? Use it.
+    QString existing = vaultTokenInput->text().trimmed();
+    if (!existing.isEmpty() && NetworkHelper::validateTokenAudience(existing, TokenHelper::RESOURCE_KEY_VAULT)) {
+        if (then) then(true);
+        return;
+    }
+    if (!userSelector->hasSelection()) {
+        appendLog("[-] No session selected - cannot acquire Key Vault token", "red");
+        if (then) then(false);
+        return;
+    }
+
+    appendLog("[*] Acquiring Key Vault token from session...", "cyan");
+    userSelector->fetchTokens({ TokenHelper::RESOURCE_KEY_VAULT },
+        [this, then](bool, const QMap<QString, QString> &tokens, const QString &error) {
+            if (tokens.contains(TokenHelper::RESOURCE_KEY_VAULT)) {
+                vaultTokenInput->setText(tokens[TokenHelper::RESOURCE_KEY_VAULT]);
+                updateTokenStatus();
+                appendLog("[+] Key Vault token acquired", "lime");
+                if (then) then(true);
+            } else {
+                appendLog("[-] Could not acquire Key Vault token: " + error, "red");
+                if (then) then(false);
             }
         });
 }

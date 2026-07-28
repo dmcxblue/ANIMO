@@ -22,7 +22,7 @@ CredentialLoginWindow::CredentialLoginWindow(DashboardWindow *parentDashboard, Q
 {
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowTitle("Azure Login (Credentials)");
-    setMinimumSize(400, 250);  // min, not fixed, so error text can grow
+    setMinimumSize(400, 250);
     setupUi();
 }
 
@@ -50,7 +50,6 @@ void CredentialLoginWindow::setupUi() {
     connect(loginButton, &QPushButton::clicked, this, &CredentialLoginWindow::handleLogin);
     layout->addWidget(loginButton);
 
-    // Enter submits from either field
     connect(username, &QLineEdit::returnPressed, this, &CredentialLoginWindow::handleLogin);
     connect(password, &QLineEdit::returnPressed, this, &CredentialLoginWindow::handleLogin);
 
@@ -65,9 +64,8 @@ void CredentialLoginWindow::setupUi() {
 }
 
 void CredentialLoginWindow::restoreUi() {
-    if (auto *btn = findChild<QPushButton*>(QStringLiteral("authButton"))) {
+    if (auto *btn = findChild<QPushButton*>(QStringLiteral("authButton")))
         btn->setEnabled(true);
-    }
     if (auto *lbl = findChild<QLabel*>(QStringLiteral("statusLabel"))) {
         lbl->setVisible(false);
         lbl->clear();
@@ -84,35 +82,9 @@ QObject* CredentialLoginWindow::locateTransport() const {
     return nullptr;
 }
 
-QString CredentialLoginWindow::findMsalScript() const {
-    // Look for the msal_auth.py script in various locations
-    QString appDir = QCoreApplication::applicationDirPath();
-
-    QStringList searchPaths = {
-        // From build/client/ directory
-        appDir + "/../../helpers/msal_auth.py",
-        appDir + "/../helpers/msal_auth.py",
-        appDir + "/helpers/msal_auth.py",
-        appDir + "/msal_auth.py",
-        // Relative paths from working directory
-        "../../helpers/msal_auth.py",
-        "../helpers/msal_auth.py",
-        "helpers/msal_auth.py",
-        "msal_auth.py"
-    };
-
-    for (const QString &path : searchPaths) {
-        QFileInfo fi(path);
-        if (fi.exists() && fi.isFile()) {
-            qDebug() << "[CredentialLoginWindow] Found MSAL script at:" << fi.absoluteFilePath();
-            return fi.absoluteFilePath();
-        }
-    }
-
-    qWarning() << "[CredentialLoginWindow] Could not find msal_auth.py in any search path";
-    qWarning() << "[CredentialLoginWindow] Application dir:" << appDir;
-    return QString();
-}
+// ============================================================================
+// Login routing
+// ============================================================================
 
 void CredentialLoginWindow::handleLogin() {
     const QString user = username->text().trimmed();
@@ -123,37 +95,187 @@ void CredentialLoginWindow::handleLogin() {
         return;
     }
 
-    // Reset session handling guard for new login attempt
     sessionHandled = false;
 
-    // Set pendingResource based on dropdown selection
-    int selectedIndex = resourceDropdown->currentIndex();
-    if (selectedIndex == 1) {
+    if (resourceDropdown->currentIndex() == 1)
         pendingResource = QStringLiteral("https://graph.microsoft.com");
-    } else {
+    else
         pendingResource = QStringLiteral("https://management.azure.com");
-    }
 
     pendingUsername = user;
     pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);
 
     QString resourceName = pendingResource.contains("graph") ? "Graph" : "Azure Management";
-    qDebug() << "[CredentialLoginWindow] Starting MSAL auth for" << user << "resource:" << pendingResource;
 
-    if (auto *btn = findChild<QPushButton*>(QStringLiteral("authButton"))) {
+    if (auto *btn = findChild<QPushButton*>(QStringLiteral("authButton")))
         btn->setEnabled(false);
-    }
     if (auto *lbl = findChild<QLabel*>(QStringLiteral("statusLabel"))) {
-        lbl->setText(QString("Authenticating %1 via %2...\n(Browser may open for MFA)").arg(user, resourceName));
+        lbl->setText(QString("Authenticating %1 via %2...").arg(user, resourceName));
         lbl->setVisible(true);
     }
     setCursor(Qt::BusyCursor);
 
-    if (parentDashboard) {
+    if (parentDashboard)
         parentDashboard->logEvent(QString("[*] Authenticating %1 via %2 (MSAL)...").arg(user, resourceName));
+    launchMsalAuth();
+}
+
+// ============================================================================
+// Server-side credential login (Management)
+// ============================================================================
+
+void CredentialLoginWindow::wireTransportHook() {
+    QObject *transportObj = locateTransport();
+    if (!transportObj) return;
+    if (hookConnected) return;
+
+    if (auto *typed = qobject_cast<ClientTransport*>(transportObj)) {
+        transportConnection = connect(typed, &ClientTransport::messageReceived, this,
+                [this](const QJsonObject &obj) {
+                    const QString act = obj.value(Protocol::F_ACTION).toString();
+                    const QString status = obj.value(Protocol::F_STATUS).toString();
+                    const QString respRid = obj.value("rid").toString();
+                    const QString sid = obj.value("sessionId").toString();
+
+                    if (!pendingRid.isEmpty() && !respRid.isEmpty() && respRid != pendingRid)
+                        return;
+
+                    if (act == QStringLiteral("session_created")) {
+                        if (sessionHandled) return;
+                        sessionHandled = true;
+                        pendingRid.clear();
+                        disconnect(transportConnection);
+                        hookConnected = false;
+
+                        const QString userName = obj.value("user").toString("Unknown");
+                        const QString tid = obj.value("tenantId").toString("N/A");
+                        const QString domain = obj.value("domain").toString("N/A");
+                        const QString res = obj.value("resource").toString("N/A");
+
+                        if (!pendingAccessToken.isEmpty()) {
+                            // MSAL path: log tokens captured client-side
+                            logTokenToServer(sid, pendingAccessToken, pendingRefreshToken,
+                                           pendingUser, pendingTenantId, pendingResource);
+                            if (parentDashboard) {
+                                parentDashboard->setSessionTokenExpiry(sid, pendingAccessToken,
+                                    pendingRefreshToken, pendingResource, pendingTenantId);
+                            }
+                            pendingAccessToken.clear();
+                            pendingRefreshToken.clear();
+                            pendingUser.clear();
+                            pendingTenantId.clear();
+                        } else {
+                            // Server-side credential path: the login script emits a
+                            // token via __ANIMO_TOKEN__ which the server forwards here.
+                            TokenInfo info;
+                            info.upn       = userName;
+                            info.tenantId  = tid;
+                            info.resource  = res;
+                            const QString serverToken = obj.value("accessToken").toString();
+                            if (!serverToken.isEmpty()) {
+                                info.accessToken = serverToken;
+                                logTokenToServer(sid, serverToken, QString(),
+                                                 userName, tid, res);
+                            }
+                            TokenStore::instance()->storeToken(sid, info);
+                        }
+
+                        // Store storage token if the server exchanged one via refresh
+                        const QString stToken = obj.value("storageToken").toString();
+                        if (!stToken.isEmpty()) {
+                            TokenInfo stInfo;
+                            stInfo.accessToken = stToken;
+                            stInfo.upn         = userName;
+                            stInfo.tenantId    = tid;
+                            stInfo.resource    = QStringLiteral("https://storage.azure.com");
+                            TokenStore::instance()->storeToken(sid, stInfo);
+                        }
+
+                        if (parentDashboard) {
+                            parentDashboard->addSessionRow(sid, userName, tid, domain, res);
+                            parentDashboard->logEvent(
+                                QString("[+] Session created for %1 (ID: %2)").arg(userName, sid));
+                        }
+                        restoreUi();
+                        QMessageBox::information(this, "Azure Login",
+                                                 QString("Login success for %1\nTenant: %2\nSession: %3")
+                                                 .arg(userName, tid, sid));
+                        close();
+                        return;
+                    }
+
+                    const bool isError = (act == QStringLiteral("error")) ||
+                                        (status == Protocol::STATUS_ERR);
+                    if (isError) {
+                        if (sessionHandled) return;
+                        sessionHandled = true;
+                        pendingRid.clear();
+                        disconnect(transportConnection);
+                        hookConnected = false;
+                        restoreUi();
+                        const QString msg = obj.value("message").toString("Unknown error");
+                        if (parentDashboard)
+                            parentDashboard->logEvent(QString("[-] Session creation failed: %1").arg(msg));
+                        QMessageBox::critical(this, "Session Error", msg);
+                        return;
+                    }
+                });
+        hookConnected = true;
+    }
+}
+
+void CredentialLoginWindow::sendCredentialLogin() {
+    QObject *transportObj = locateTransport();
+    if (!transportObj) {
+        restoreUi();
+        QMessageBox::critical(this, "Transport Missing", "No transport available.");
+        return;
     }
 
-    launchMsalAuth();
+    wireTransportHook();
+
+    pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString user = username->text().trimmed();
+    const QString domain = user.contains('@') ? user.section('@', 1, 1) : QStringLiteral("N/A");
+
+    QJsonObject req;
+    req.insert(Protocol::F_ACTION, Protocol::ACTION_NEW_SESSION);
+    req.insert("mode",     QStringLiteral("credentials"));
+    req.insert("username", user);
+    req.insert("password", password->text());
+    req.insert("resource", pendingResource);
+    req.insert("user",     user);
+    req.insert("domain",   domain);
+    req.insert("rid",      pendingRid);
+
+    if (auto *typed = qobject_cast<ClientTransport*>(transportObj))
+        typed->sendJson(req);
+    else
+        QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
+}
+
+// ============================================================================
+// MSAL interactive login (Graph / MFA)
+// ============================================================================
+
+QString CredentialLoginWindow::findMsalScript() const {
+    QString appDir = QCoreApplication::applicationDirPath();
+    QStringList searchPaths = {
+        appDir + "/../../helpers/msal_auth.py",
+        appDir + "/../helpers/msal_auth.py",
+        appDir + "/helpers/msal_auth.py",
+        appDir + "/msal_auth.py",
+        "../../helpers/msal_auth.py",
+        "../helpers/msal_auth.py",
+        "helpers/msal_auth.py",
+        "msal_auth.py"
+    };
+    for (const QString &path : searchPaths) {
+        QFileInfo fi(path);
+        if (fi.exists() && fi.isFile())
+            return fi.absoluteFilePath();
+    }
+    return QString();
 }
 
 void CredentialLoginWindow::launchMsalAuth() {
@@ -166,9 +288,6 @@ void CredentialLoginWindow::launchMsalAuth() {
         return;
     }
 
-    qDebug() << "[CredentialLoginWindow] Using MSAL script:" << scriptPath;
-
-    // Clean up any existing process
     if (msalProcess) {
         msalProcess->disconnect();
         msalProcess->kill();
@@ -176,25 +295,16 @@ void CredentialLoginWindow::launchMsalAuth() {
     }
 
     msalProcess = new QProcess(this);
-
     connect(msalProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &CredentialLoginWindow::onMsalProcessFinished);
     connect(msalProcess, &QProcess::errorOccurred,
             this, &CredentialLoginWindow::onMsalProcessError);
 
-    // Build arguments
     QStringList args;
     args << scriptPath;
     args << "--username" << pendingUsername;
     args << "--password" << password->text();
     args << "--resource" << pendingResource;
-
-    qDebug() << "[CredentialLoginWindow] Launching:" << "python3" << args.join(" ");
-
-    // Background process - no need to show in UI
-    // if (parentDashboard) {
-    //     parentDashboard->logEvent("[*] Launching Python MSAL authentication...");
-    // }
 
     msalProcess->start("python3", args);
 }
@@ -205,14 +315,16 @@ void CredentialLoginWindow::onMsalProcessFinished(int exitCode, QProcess::ExitSt
     QByteArray stdoutData = msalProcess->readAllStandardOutput();
     QByteArray stderrData = msalProcess->readAllStandardError();
 
-    qDebug() << "[CredentialLoginWindow] MSAL process finished with exit code:" << exitCode;
-    qDebug() << "[CredentialLoginWindow] stdout:" << stdoutData;
-    if (!stderrData.isEmpty()) {
-        qDebug() << "[CredentialLoginWindow] stderr:" << stderrData;
-        // Log stderr to event log (it contains progress info)
-        if (parentDashboard && !stderrData.trimmed().isEmpty()) {
-            parentDashboard->logEvent(QString::fromUtf8(stderrData.trimmed()));
-        }
+    if (!stderrData.isEmpty() && parentDashboard && !stderrData.trimmed().isEmpty())
+        parentDashboard->logEvent(QString::fromUtf8(stderrData.trimmed()));
+
+    if (exitCode != 0 && stdoutData.isEmpty()) {
+        restoreUi();
+        QString err = stderrData.isEmpty() ? "MSAL process failed" : QString::fromUtf8(stderrData);
+        if (parentDashboard)
+            parentDashboard->logEvent(QString("[-] MSAL error: %1").arg(err));
+        QMessageBox::critical(this, "Authentication Error", err);
+        return;
     }
 
     handleMsalResult(stdoutData);
@@ -220,43 +332,28 @@ void CredentialLoginWindow::onMsalProcessFinished(int exitCode, QProcess::ExitSt
 
 void CredentialLoginWindow::onMsalProcessError(QProcess::ProcessError error) {
     restoreUi();
-
     QString errorMsg;
     switch (error) {
         case QProcess::FailedToStart:
             errorMsg = "Failed to start Python. Make sure python3 and msal are installed.\n"
                       "Install with: pip install msal";
             break;
-        case QProcess::Crashed:
-            errorMsg = "MSAL process crashed";
-            break;
-        case QProcess::Timedout:
-            errorMsg = "MSAL process timed out";
-            break;
-        default:
-            errorMsg = "MSAL process error";
-            break;
+        case QProcess::Crashed:  errorMsg = "MSAL process crashed"; break;
+        case QProcess::Timedout: errorMsg = "MSAL process timed out"; break;
+        default:                 errorMsg = "MSAL process error"; break;
     }
-
-    qDebug() << "[CredentialLoginWindow] Process error:" << errorMsg;
-
-    if (parentDashboard) {
+    if (parentDashboard)
         parentDashboard->logEvent(QString("[-] MSAL Error: %1").arg(errorMsg));
-    }
-
     QMessageBox::critical(this, "Authentication Error", errorMsg);
 }
 
 void CredentialLoginWindow::handleMsalResult(const QByteArray &output) {
-    // Parse JSON output from msal_auth.py
     QJsonDocument doc = QJsonDocument::fromJson(output);
     if (!doc.isObject()) {
         restoreUi();
-        QString errorMsg = "Invalid response from MSAL script";
-        if (parentDashboard) {
-            parentDashboard->logEvent(QString("[-] %1").arg(errorMsg));
-        }
-        QMessageBox::critical(this, "Authentication Error", errorMsg);
+        if (parentDashboard)
+            parentDashboard->logEvent("[-] Invalid response from MSAL script");
+        QMessageBox::critical(this, "Authentication Error", "Invalid response from MSAL script");
         return;
     }
 
@@ -266,48 +363,35 @@ void CredentialLoginWindow::handleMsalResult(const QByteArray &output) {
     if (status == "success") {
         QString accessToken = obj.value("access_token").toString();
         QString refreshToken = obj.value("refresh_token").toString();
-        QString idToken = obj.value("id_token").toString();
         QString tenantId = obj.value("tenant_id").toString();
         QString upn = obj.value("upn").toString();
+        if (upn.isEmpty()) upn = pendingUsername;
 
-        if (upn.isEmpty()) {
-            upn = pendingUsername;
-        }
-
-        qDebug() << "[CredentialLoginWindow] MSAL auth success for:" << upn;
-
-        if (parentDashboard) {
+        if (parentDashboard)
             parentDashboard->logEvent(QString("[+] MSAL auth success for %1").arg(upn));
-        }
 
-        // Store pending tokens for logging after session creation
         pendingAccessToken = accessToken;
         pendingRefreshToken = refreshToken;
         pendingUser = upn;
         pendingTenantId = tenantId;
 
-        if (auto *lbl = findChild<QLabel*>(QStringLiteral("statusLabel"))) {
+        if (auto *lbl = findChild<QLabel*>(QStringLiteral("statusLabel")))
             lbl->setText("Creating session...");
-        }
 
         createSessionWithTokens(accessToken, refreshToken, tenantId, upn);
 
     } else if (status == "mfa_required") {
-        // This shouldn't happen since msal_auth.py auto-fallbacks to interactive
         QString message = obj.value("message").toString("MFA required");
         restoreUi();
-        if (parentDashboard) {
+        if (parentDashboard)
             parentDashboard->logEvent(QString("[!] MFA required: %1").arg(message));
-        }
         QMessageBox::warning(this, "MFA Required", message);
 
     } else {
-        // Error
         QString message = obj.value("message").toString("Authentication failed");
         restoreUi();
-        if (parentDashboard) {
+        if (parentDashboard)
             parentDashboard->logEvent(QString("[-] Auth failed: %1").arg(message));
-        }
         QMessageBox::critical(this, "Authentication Failed", message);
     }
 }
@@ -324,101 +408,7 @@ void CredentialLoginWindow::createSessionWithTokens(const QString &accessToken,
         return;
     }
 
-    // Wire up response handling if not already done
-    if (!hookConnected) {
-        if (auto *typed = qobject_cast<ClientTransport*>(transportObj)) {
-            transportConnection = connect(typed, &ClientTransport::messageReceived, this,
-                    [this](const QJsonObject &obj) {
-                        const QString act = obj.value(Protocol::F_ACTION).toString();
-                        const QString status = obj.value(Protocol::F_STATUS).toString();
-                        const QString respRid = obj.value("rid").toString();
-                        const QString sid = obj.value("sessionId").toString();
-
-                        // Debug: log all received messages
-                        qDebug() << "[CredentialLogin] Received message:"
-                                 << "action=" << act
-                                 << "status=" << status
-                                 << "rid=" << respRid
-                                 << "sessionId=" << sid
-                                 << "pendingRid=" << pendingRid
-                                 << "sessionHandled=" << sessionHandled;
-
-                        // Filter by RID if both are present
-                        if (!pendingRid.isEmpty() && !respRid.isEmpty() && respRid != pendingRid) {
-                            qDebug() << "[CredentialLogin] Skipping message - RID mismatch";
-                            return;
-                        }
-
-                        if (act == QStringLiteral("session_created")) {
-                            // Guard against duplicate handling
-                            if (sessionHandled) return;
-                            sessionHandled = true;
-                            pendingRid.clear();
-
-                            // Disconnect to prevent stale connections
-                            disconnect(transportConnection);
-                            hookConnected = false;
-
-                            const QString userName = obj.value("user").toString("Unknown");
-                            const QString tid = obj.value("tenantId").toString("N/A");
-                            const QString domain = obj.value("domain").toString("N/A");
-                            const QString res = obj.value("resource").toString("N/A");
-
-                            // Log token to server and set expiry if we have pending tokens
-                            if (!pendingAccessToken.isEmpty()) {
-                                logTokenToServer(sid, pendingAccessToken, pendingRefreshToken,
-                                               pendingUser, pendingTenantId, pendingResource);
-
-                                // Set token expiry for auto-renewal tracking
-                                if (parentDashboard) {
-                                    parentDashboard->setSessionTokenExpiry(sid, pendingAccessToken,
-                                        pendingRefreshToken, pendingResource, pendingTenantId);
-                                }
-
-                                pendingAccessToken.clear();
-                                pendingRefreshToken.clear();
-                                pendingUser.clear();
-                                pendingTenantId.clear();
-                            }
-
-                            if (parentDashboard) {
-                                parentDashboard->addSessionRow(sid, userName, tid, domain, res);
-                                parentDashboard->logEvent(
-                                    QString("[+] Session created for %1 (ID: %2)").arg(userName, sid));
-                            }
-                            restoreUi();
-                            QMessageBox::information(this, "Azure Login",
-                                                     QString("Login success for %1\nTenant: %2\nSession: %3")
-                                                     .arg(userName, tid, sid));
-                            close();
-                            return;
-                        }
-
-                        // Check for error via action OR status field
-                        const bool isError = (act == QStringLiteral("error")) ||
-                                            (status == Protocol::STATUS_ERR);
-                        if (isError) {
-                            // Guard against duplicate handling
-                            if (sessionHandled) return;
-                            sessionHandled = true;
-                            pendingRid.clear();
-
-                            // Disconnect to prevent stale connections
-                            disconnect(transportConnection);
-                            hookConnected = false;
-
-                            restoreUi();
-                            const QString msg = obj.value("message").toString("Unknown error");
-                            if (parentDashboard) {
-                                parentDashboard->logEvent(QString("[-] Session creation failed: %1").arg(msg));
-                            }
-                            QMessageBox::critical(this, "Session Error", msg);
-                            return;
-                        }
-                    });
-            hookConnected = true;
-        }
-    }
+    wireTransportHook();
 
     pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QString domain = upn.contains('@') ? upn.section('@', 1, 1) : QStringLiteral("N/A");
@@ -434,20 +424,10 @@ void CredentialLoginWindow::createSessionWithTokens(const QString &accessToken,
     req.insert("domain",       domain);
     req.insert("rid",          pendingRid);
 
-    qDebug() << "[CredentialLogin] Sending new_session request:"
-             << "mode=tokens"
-             << "resource=" << pendingResource
-             << "user=" << upn
-             << "rid=" << pendingRid
-             << "hasRefreshToken=" << !refreshToken.isEmpty();
-
-    if (auto *typed = qobject_cast<ClientTransport*>(transportObj)) {
+    if (auto *typed = qobject_cast<ClientTransport*>(transportObj))
         typed->sendJson(req);
-        qDebug() << "[CredentialLogin] Request sent via typed transport";
-    } else {
+    else
         QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
-        qDebug() << "[CredentialLogin] Request sent via invokeMethod";
-    }
 }
 
 void CredentialLoginWindow::logTokenToServer(const QString &sessionId,
@@ -457,15 +437,11 @@ void CredentialLoginWindow::logTokenToServer(const QString &sessionId,
                                               const QString &tenantId,
                                               const QString &resource)
 {
-    if (sessionId.isEmpty() || accessToken.isEmpty()) {
+    if (sessionId.isEmpty() || accessToken.isEmpty())
         return;
-    }
 
     QObject *transportObj = locateTransport();
-    if (!transportObj) {
-        qWarning() << "[CredentialLogin] Cannot log token: no transport found";
-        return;
-    }
+    if (!transportObj) return;
 
     QJsonObject req;
     req.insert(Protocol::F_ACTION, Protocol::ACTION_LOG_TOKEN);
@@ -477,14 +453,11 @@ void CredentialLoginWindow::logTokenToServer(const QString &sessionId,
     if (!tenantId.isEmpty()) req.insert("tenantId", tenantId);
     if (!resource.isEmpty()) req.insert("resource", resource);
 
-    if (auto *typed = qobject_cast<ClientTransport*>(transportObj)) {
+    if (auto *typed = qobject_cast<ClientTransport*>(transportObj))
         typed->sendJson(req);
-    } else {
+    else
         QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
-    }
 
-    // Mirror into TokenStore so plugin windows' UserSelectorWidget see this
-    // user immediately, without waiting for a reconnect bootstrap.
     TokenInfo tokenInfo;
     tokenInfo.accessToken  = accessToken;
     tokenInfo.refreshToken = refreshToken;
@@ -492,6 +465,4 @@ void CredentialLoginWindow::logTokenToServer(const QString &sessionId,
     tokenInfo.tenantId     = tenantId;
     tokenInfo.resource     = resource;
     TokenStore::instance()->storeToken(sessionId, tokenInfo);
-
-    qDebug() << "[CredentialLogin] Token logged to server for session:" << sessionId;
 }

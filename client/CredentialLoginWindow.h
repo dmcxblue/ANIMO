@@ -6,6 +6,7 @@
 #include <QLineEdit>
 #include <QString>
 #include <QProcess>
+#include <QCheckBox>
 
 class DashboardWindow;
 
@@ -23,6 +24,13 @@ private slots:
 private:
     void setupUi();
     void restoreUi();
+    QObject* locateTransport() const;
+
+    // Server-side credential login (Connect-AzAccount -Credential, full token cache)
+    void sendCredentialLogin();
+
+    // MSAL interactive login (handles MFA, browser-based)
+    QString findMsalScript() const;
     void launchMsalAuth();
     void handleMsalResult(const QByteArray &output);
     void createSessionWithTokens(const QString &accessToken,
@@ -35,8 +43,8 @@ private:
                          const QString &user,
                          const QString &tenantId,
                          const QString &resource);
-    QObject* locateTransport() const;
-    QString findMsalScript() const;
+
+    void wireTransportHook();
 
 private:
     DashboardWindow *parentDashboard = nullptr;
@@ -48,18 +56,15 @@ private:
     QString pendingResource;
     QString pendingUsername;
     bool    hookConnected = false;
+    bool    sessionHandled = false;
     QProcess *msalProcess = nullptr;
 
-    // Token logging
+    // Token logging (MSAL path)
     QString pendingAccessToken;
     QString pendingRefreshToken;
     QString pendingUser;
     QString pendingTenantId;
 
-    // Guard against duplicate session_created handling
-    bool sessionHandled = false;
-
-    // Store connection for cleanup
     QMetaObject::Connection transportConnection;
 };
 

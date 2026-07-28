@@ -3,6 +3,8 @@
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
 #include <QJsonParseError>   // ← needed for QJsonParseError
 #include <QEventLoop>
 #include <QTimer>
@@ -85,10 +87,12 @@ void ClientTransport::sendJson(const QJsonObject &obj) {
 }
 
 bool ClientTransport::connectAndLogin(const QString &host, quint16 port,
-                                      const QString &password, int timeoutMs) {
+                                      const QString &username, const QString &password,
+                                      int timeoutMs) {
     // Save connection details for auto-reconnect
     m_lastHost = host;
     m_lastPort = port;
+    m_lastUsername = username;
     m_lastPassword = password;
 
     // Ensure socket is not already connecting/connected
@@ -123,10 +127,10 @@ bool ClientTransport::connectAndLogin(const QString &host, quint16 port,
         return false;
     }
 
-    // Send login JSON (username ignored by server, only password matters)
+    // Send login JSON with the operator identity used for attribution.
     QJsonObject loginObj;
     loginObj.insert(Protocol::F_ACTION,   Protocol::ACTION_LOGIN);
-    loginObj.insert(Protocol::F_USERNAME, QString("any"));
+    loginObj.insert(Protocol::F_USERNAME, username);
     loginObj.insert(Protocol::F_PASSWORD, password);
     sendJson(loginObj);
 
@@ -197,7 +201,7 @@ void ClientTransport::onSocketReadyRead() {
                 emit messageReceived(msg);
             }
         } else {
-            // No status field — treat as generic message
+            // No status field - treat as generic message
             emit messageReceived(msg);
         }
     }
@@ -271,7 +275,7 @@ void ClientTransport::attemptReconnect() {
     // Attempt reconnection
     if (m_wasAuthenticated && !m_lastPassword.isEmpty()) {
         // Use authenticated reconnection
-        bool success = connectAndLogin(m_lastHost, m_lastPort, m_lastPassword, 5000);
+        bool success = connectAndLogin(m_lastHost, m_lastPort, m_lastUsername, m_lastPassword, 5000);
         if (!success) {
             // Exponential backoff: delay * attempts
             int delay = m_reconnectDelayMs * m_reconnectAttempts;

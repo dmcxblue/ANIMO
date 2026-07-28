@@ -14,7 +14,7 @@
 #include "network/ClientTransport.h"
 #include "../shared/Protocol.h"
 
-// ——— helpers ———
+// --- helpers ---
 static inline QString b64UrlDecodeToJsonField(const QString &jwt, const char *field) {
     const QStringList parts = jwt.split('.');
     if (parts.size() < 2) return QString();

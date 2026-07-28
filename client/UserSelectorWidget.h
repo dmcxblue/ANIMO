@@ -14,11 +14,14 @@ class UserSelectorWidget : public QWidget {
 public:
     explicit UserSelectorWidget(QWidget *parent = nullptr);
 
-    // Get the currently selected user (UPN)
+    // Get the currently selected user (UPN of the selected session)
     QString selectedUser() const { return m_selectedUpn; }
 
-    // Check if a user is selected
-    bool hasSelection() const { return !m_selectedUpn.isEmpty(); }
+    // Get the currently selected session (the real selection unit)
+    QString selectedSession() const { return m_selectedSessionId; }
+
+    // Check if a session is selected
+    bool hasSelection() const { return !m_selectedSessionId.isEmpty(); }
 
     // Refresh the user list
     void refresh();
@@ -58,7 +61,8 @@ private slots:
 private:
     QComboBox *m_userCombo;
     QPushButton *m_refreshBtn;
-    QString m_selectedUpn;
+    QString m_selectedUpn;        // UPN of the selected session (for display / back-compat)
+    QString m_selectedSessionId;  // the actual selection unit
 };
 
 #endif // USERSELECTORWIDGET_H

@@ -1,6 +1,7 @@
 #include "SPNLoginWindow.h"
 #include "DashboardWindow.h"
 #include "TokenStore.h"
+#include "SpnCredentialStore.h"
 #include "network/ClientTransport.h"
 #include "../shared/Protocol.h"
 
@@ -13,6 +14,7 @@
 #include <QNetworkReply>
 #include <QUrlQuery>
 #include <QJsonDocument>
+#include <QRegularExpression>
 
 SPNLoginWindow::SPNLoginWindow(DashboardWindow *parentDashboard, QWidget *parent)
     : QWidget(parent), parentDashboard(parentDashboard),
@@ -67,6 +69,13 @@ void SPNLoginWindow::setupUi() {
     tenantIdEdit->setPlaceholderText("Tenant ID");
     layout->addWidget(tenantIdEdit);
 
+    layout->addWidget(new QLabel("— or —", this));
+
+    accessTokenEdit = new QLineEdit(this);
+    accessTokenEdit->setEchoMode(QLineEdit::Password);
+    accessTokenEdit->setPlaceholderText("SPN Access Token (paste to skip App ID / Secret)");
+    layout->addWidget(accessTokenEdit);
+
     loginBtn = new QPushButton("Authenticate", this);
     loginBtn->setDefault(true);
     layout->addWidget(loginBtn);
@@ -82,41 +91,115 @@ void SPNLoginWindow::setupUi() {
     layout->addWidget(statusLabel);
 
     connect(loginBtn, &QPushButton::clicked, this, [this]() {
-        const QString appId    = appIdEdit->text().trimmed();
-        const QString secret   = secretEdit->text();
-        const QString tenantId = tenantIdEdit->text().trimmed();
-        const QString resource = resourceDropdown->currentData().toString();
-
-        if (appId.isEmpty() || secret.isEmpty() || tenantId.isEmpty()) {
-            QMessageBox::warning(this, "SPN Login",
-                                 "App ID, Client Secret, and Tenant ID are all required.");
-            return;
-        }
+        const QString appId       = appIdEdit->text().trimmed();
+        const QString secret      = secretEdit->text();
+        const QString tenantId    = tenantIdEdit->text().trimmed();
+        const QString resource    = resourceDropdown->currentData().toString();
+        const QString accessToken = accessTokenEdit->text().trimmed();
 
         sessionHandled = false;
         pendingResource = resource;
+
+        // --- Access-token login: use the pasted SPN token directly ---
+        if (!accessToken.isEmpty()) {
+            const QJsonObject claims = TokenStore::parseJwtPayload(accessToken);
+            const QString tokAppId = claims.value("appid").toString(
+                                        claims.value("azp").toString(appId));
+            const QString tokTid   = claims.value("tid").toString(tenantId);
+            pendingAppId = tokAppId.isEmpty() ? QStringLiteral("ServicePrincipal") : tokAppId;
+            pendingTenantId = tokTid;
+
+            // Warn (don't block) if the token's audience doesn't match the chosen resource.
+            const QString aud = claims.value("aud").toString();
+            auto audOkForResource = [](QString a, QString r) -> bool {
+                a = a.trimmed().toLower(); if (a.endsWith('/')) a.chop(1);
+                r = r.trimmed().toLower(); if (r.endsWith('/')) r.chop(1);
+                if (a.isEmpty()) return true;                 // unparseable -> don't nag
+                if (a == r || a.contains(r) || r.contains(a)) return true;
+                // v1 tokens use the resource app's GUID as the audience.
+                if (r.contains("graph.microsoft.com") && a.contains("00000003-0000-0000-c000-000000000000")) return true;
+                if (r.contains("management.azure.com") && a.contains("management.core.windows.net")) return true;
+                return false;
+            };
+            if (!audOkForResource(aud, resource)) {
+                auto btn = QMessageBox::warning(this, "Token Audience Mismatch",
+                    QString("This token's audience is:\n    %1\n\nbut you selected the resource:\n    %2\n\n"
+                            "The token probably won't work for that resource. Continue anyway?")
+                        .arg(aud.isEmpty() ? QStringLiteral("(could not read 'aud')") : aud, resource),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (btn != QMessageBox::Yes) return;   // UI not yet disabled - just abort
+            }
+
+            loginBtn->setEnabled(false);
+            statusLabel->setText("Creating session from access token...");
+            statusLabel->setVisible(true);
+            setCursor(Qt::BusyCursor);
+
+            if (parentDashboard) {
+                QString label = resourceDropdown->currentText().section('(', 0, 0).trimmed();
+                parentDashboard->logEvent(
+                    QString("[*] SPN access-token login → %1 (appId %2)...").arg(label, pendingAppId));
+            }
+            wireTransport();
+            createSessionWithToken(accessToken, resource, pendingAppId, tokTid);
+            return;
+        }
+
+        // --- Client-credentials login: App ID + Secret + Tenant ---
+        if (appId.isEmpty() || secret.isEmpty() || tenantId.isEmpty()) {
+            QMessageBox::warning(this, "SPN Login",
+                                 "Provide App ID + Client Secret + Tenant ID, or paste an SPN Access Token.");
+            return;
+        }
+
         pendingAppId = appId;
         pendingTenantId = tenantId;
 
         loginBtn->setEnabled(false);
-        statusLabel->setText("Authenticating as Service Principal...");
+        statusLabel->setText("Resolving tenant...");
         statusLabel->setVisible(true);
         setCursor(Qt::BusyCursor);
 
-        if (parentDashboard) {
-            QString label = resourceDropdown->currentText().section('(', 0, 0).trimmed();
-            parentDashboard->logEvent(
-                QString("[*] Authenticating SPN %1 → %2 in tenant %3...")
-                    .arg(appId, label, tenantId));
-        }
+        // Stash the SPN's secret so modules that need Graph/Storage/etc. tokens
+        // from this session can silently mint them via client_credentials. SPN
+        // tokens have NO refresh token, so this is the only way. Kept in memory
+        // only; wiped when the session is removed.
+        pendingSecret = secret;
 
-        // Azure Management uses PowerShell flow (sets up Az context for cmdlets)
-        // Everything else uses direct OAuth2 client_credentials grant
-        if (resource.contains("management.azure.com")) {
-            authenticateViaPowerShell(appId, secret, tenantId);
-        } else {
-            authenticateClientCredentials(appId, secret, tenantId, resource);
-        }
+        // Resolve tenant domain -> GUID before any downstream code uses it.
+        // Get-AzSubscription / roleAssignments / token endpoints all prefer the
+        // GUID; passing a domain works in most places but occasionally trips up
+        // Az.Accounts and the OAuth2 v2.0 endpoint in edge cases.
+        resolveTenantIdAsync(tenantId, [this, appId, secret, resource]
+                             (const QString &resolvedTenantId, const QString &err) {
+            if (resolvedTenantId.isEmpty()) {
+                restoreUi();
+                if (parentDashboard) {
+                    parentDashboard->logEvent(QString("[-] Tenant resolution failed: %1").arg(err));
+                }
+                QMessageBox::critical(this, "Tenant Resolution Failed",
+                    QString("Could not resolve tenant '%1'.\n\nError: %2\n\n"
+                            "If this is definitely a valid tenant, paste the tenant GUID directly.")
+                        .arg(pendingTenantId, err));
+                return;
+            }
+            pendingTenantId = resolvedTenantId;
+
+            statusLabel->setText("Authenticating as Service Principal...");
+
+            if (parentDashboard) {
+                QString label = resourceDropdown->currentText().section('(', 0, 0).trimmed();
+                parentDashboard->logEvent(
+                    QString("[*] Authenticating SPN %1 → %2 in tenant %3...")
+                        .arg(appId, label, resolvedTenantId));
+            }
+
+            if (resource.contains("management.azure.com")) {
+                authenticateViaPowerShell(appId, secret, resolvedTenantId);
+            } else {
+                authenticateClientCredentials(appId, secret, resolvedTenantId, resource);
+            }
+        });
     });
 
     setLayout(layout);
@@ -209,6 +292,55 @@ void SPNLoginWindow::authenticateClientCredentials(const QString &appId,
     });
 }
 
+void SPNLoginWindow::resolveTenantIdAsync(const QString &tenantOrDomain,
+    std::function<void(const QString &, const QString &)> then)
+{
+    // GUID passthrough. Az / OAuth v2 endpoints both take GUIDs directly.
+    static const QRegularExpression guidRe(
+        QStringLiteral("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                       "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
+    const QString value = tenantOrDomain.trimmed();
+    if (value.isEmpty()) { then(QString(), "empty tenant"); return; }
+    if (guidRe.match(value).hasMatch()) { then(value, QString()); return; }
+
+    // .well-known/openid-configuration works for any registered domain, verified
+    // or not. authorization_endpoint has the form
+    //   https://login.microsoftonline.com/<tenantGuid>/oauth2/authorize
+    QUrl url(QString("https://login.microsoftonline.com/%1/.well-known/openid-configuration")
+                 .arg(value));
+    QNetworkRequest req(url);
+    QNetworkReply *reply = net->get(req);
+    if (!reply) { then(QString(), "failed to send discovery request"); return; }
+    activeReplies.append(reply);
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, value, then]() {
+        activeReplies.removeAll(reply);
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            then(QString(), QString("HTTP: %1").arg(reply->errorString()));
+            return;
+        }
+        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString authEndpoint = obj.value("authorization_endpoint").toString();
+        // Extract GUID between login.microsoftonline.com/ and /oauth2/...
+        static const QRegularExpression extractGuid(
+            QStringLiteral(R"(login\.microsoftonline\.com/([0-9a-fA-F\-]{36})/)"));
+        const auto m = extractGuid.match(authEndpoint);
+        if (!m.hasMatch()) {
+            then(QString(), QString("Discovery reply had no tenant GUID (raw: %1)")
+                            .arg(authEndpoint.left(120)));
+            return;
+        }
+        const QString guid = m.captured(1);
+        if (parentDashboard) {
+            parentDashboard->logEvent(
+                QString("[*] Resolved tenant '%1' -> %2").arg(value, guid));
+        }
+        then(guid, QString());
+    });
+}
+
 void SPNLoginWindow::createSessionWithToken(const QString &accessToken,
                                              const QString &resource,
                                              const QString &appId,
@@ -242,7 +374,7 @@ void SPNLoginWindow::createSessionWithToken(const QString &accessToken,
 }
 
 // ============================================================================
-// PowerShell flow (Azure Management — sets up Az context)
+// PowerShell flow (Azure Management - sets up Az context)
 // ============================================================================
 
 void SPNLoginWindow::authenticateViaPowerShell(const QString &appId,
@@ -324,6 +456,22 @@ void SPNLoginWindow::wireTransport() {
                             tokenInfo.tenantId = tenantId;
                             tokenInfo.upn = user;
                             TokenStore::instance()->storeToken(sid, tokenInfo);
+
+                            // Stash SPN creds under the same session so other
+                            // modules can mint per-resource tokens later. Only
+                            // valid for client_credentials flows (i.e. we have
+                            // a secret in hand). Wiped on session removal.
+                            if (!pendingSecret.isEmpty() && !pendingAppId.isEmpty() &&
+                                !tenantId.isEmpty()) {
+                                SpnCredentials c;
+                                c.appId = pendingAppId;
+                                c.secret = pendingSecret;
+                                c.tenantId = tenantId;
+                                SpnCredentialStore::instance()->store(sid, c);
+                                // Wipe local copy after handing it off.
+                                pendingSecret.fill(QChar(0));
+                                pendingSecret.clear();
+                            }
 
                             logTokenToServer(sid, accessToken, user, tenantId, res);
 

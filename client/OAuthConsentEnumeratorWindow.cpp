@@ -131,7 +131,7 @@ void OAuthConsentEnumeratorWindow::setupUi() {
 
     // Results tree
     resultsTree = new QTreeWidget(this);
-    new TablePlaceholder(resultsTree, "No consent grants yet — run enumeration.");
+    new TablePlaceholder(resultsTree, "No consent grants yet - run enumeration.");
     resultsTree->setHeaderLabels({"Principal/App", "Resource", "Scope", "Consent Type", "ID"});
     resultsTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
     resultsTree->header()->setStretchLastSection(true);

@@ -33,6 +33,13 @@ private:
                           const QString &resource);
 
     // Client-credentials OAuth2 flow (for Graph + other non-Az resources)
+    // Convert a tenant domain (e.g. "contoso.com" or "contoso.onmicrosoft.com")
+    // into the tenant GUID via login.microsoftonline.com/<x>/.well-known/openid-configuration.
+    // Fires the callback with the GUID on success, or an empty string on failure.
+    // If the input already looks like a GUID it is returned as-is (no network call).
+    void resolveTenantIdAsync(const QString &tenantOrDomain,
+                              std::function<void(const QString &tenantId, const QString &err)> then);
+
     void authenticateClientCredentials(const QString &appId,
                                        const QString &secret,
                                        const QString &tenantId,
@@ -55,6 +62,7 @@ private:
     QLineEdit   *appIdEdit      = nullptr;
     QLineEdit   *secretEdit     = nullptr;
     QLineEdit   *tenantIdEdit   = nullptr;
+    QLineEdit   *accessTokenEdit = nullptr;  // optional: log in directly with an SPN access token
     QPushButton *loginBtn       = nullptr;
     QLabel      *statusLabel    = nullptr;
 
@@ -62,6 +70,7 @@ private:
     QString pendingResource;
     QString pendingAppId;
     QString pendingTenantId;
+    QString pendingSecret;  // stashed for SpnCredentialStore once session_created lands
     bool hookConnected   = false;
     bool sessionHandled  = false;
 

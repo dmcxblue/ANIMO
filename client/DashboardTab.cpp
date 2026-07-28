@@ -150,6 +150,10 @@ DashboardTab::DashboardTab(const QString &label,
 {
     output = new QTextEdit(this);
     output->setReadOnly(true);
+    // Cap scrollback so unbounded output (Get-AzResource in huge tenants, tail
+    // of a long-running script, etc.) doesn't blow up memory or slow repaints.
+    // 50k lines is roughly 5-10 MB of text - plenty for interactive use.
+    output->document()->setMaximumBlockCount(50000);
     // Cross-platform monospace font for proper column alignment
     QFont monoFont("Monospace", 10);
     monoFont.setStyleHint(QFont::Monospace);
@@ -219,7 +223,7 @@ void DashboardTab::runCustomQuery() {
     queryInput->addToHistory(query);
     saveCommandHistory();
 
-    // NO client-side DB writes — server owns history.
+    // NO client-side DB writes - server owns history.
     lastSentCommand = query; // keep this if you use it elsewhere
 
     // Send to server transport - server will send command_started which displays the command
@@ -350,9 +354,15 @@ void DashboardTab::handleServerObject(const QJsonObject &obj) {
         pc.command = command;
         pc.headerShown = false;
         pc.completed = false;
+        // Attach any output that raced ahead of this command_started.
+        if (orphanOutput.contains(cmdId)) pc.outputLines = orphanOutput.take(cmdId);
         pendingCommands.append(pc);
 
-        // If this is the only/first command, show header immediately
+        // Signal "running" on the first in-flight command (rising edge).
+        if (pendingCommands.size() == 1) emit runningStateChanged(true);
+
+        // Show the header for the FRONT command immediately (just the echo). Output is
+        // always buffered and rendered in order at completion, so nothing can interleave.
         if (pendingCommands.size() == 1) {
             pendingCommands[0].headerShown = true;
             QTextCursor cursor = output->textCursor();
@@ -364,14 +374,30 @@ void DashboardTab::handleServerObject(const QJsonObject &obj) {
     } else if (act == QStringLiteral("command_complete")) {
         // Command finished executing - mark as complete and flush
         const QString cmdId = obj.value("cmdId").toString();
+        const bool ok = obj.value("ok").toBool(true);        // absent => assume success
+        const int exitCode = obj.value("exitCode").toInt(0);
+        // Server-side fallback: the DB-captured stdout shipped alongside the
+        // completion frame. We use it only when our live outputLines buffer is
+        // empty for the matched command, i.e. the live `output` message was
+        // dropped somewhere between server and here.
+        const QString fallbackStdout = obj.value("stdoutFallback").toString();
+
         if (cmdId == currentCmdId) {
             currentCmdId.clear();
         }
 
-        // Find and mark the command as completed
+        // Find and mark the command as completed. If nothing streamed live,
+        // use the DB-backed stdoutFallback so the operator always sees output.
         for (int i = 0; i < pendingCommands.size(); ++i) {
             if (pendingCommands[i].cmdId == cmdId) {
                 pendingCommands[i].completed = true;
+                pendingCommands[i].ok = ok;
+                pendingCommands[i].exitCode = exitCode;
+                if (pendingCommands[i].outputLines.isEmpty() && !fallbackStdout.isEmpty()) {
+                    QString line = fallbackStdout;
+                    if (!line.endsWith('\n')) line.append('\n');
+                    pendingCommands[i].outputLines.append(line);
+                }
                 break;
             }
         }
@@ -397,30 +423,35 @@ void DashboardTab::handleServerObject(const QJsonObject &obj) {
             if (!formattedLine.endsWith('\n')) formattedLine.append('\n');
         }
 
-        // Find the matching pending command and buffer the output
+        // If the server sent output without a cmdId (pre-login raw broadcast, the
+        // g_earlyOutput drain, or any code path that emits unframed output) render
+        // it directly. Historically these bytes were silently dropped because the
+        // pendingCommands lookup can't match an empty key and the orphan store
+        // required a non-empty key too. That swallowed login diagnostics like
+        // device-code URLs and the [Animo] SPN sub-list.
+        if (cmdId.isEmpty()) {
+            QTextCursor cursor = output->textCursor();
+            ansiToQText(cursor, formattedLine);
+            output->moveCursor(QTextCursor::End);
+            return;
+        }
+
+        // ALWAYS buffer output against its command - never write to the cursor live.
+        // Rendering happens only in flushCompletedCommands, strictly in FIFO order, so
+        // one command's output can never appear under another's header.
         bool found = false;
         for (int i = 0; i < pendingCommands.size(); ++i) {
             if (pendingCommands[i].cmdId == cmdId) {
+                pendingCommands[i].outputLines.append(formattedLine);
                 found = true;
-                // If this is the first command and header is shown, display immediately
-                if (i == 0 && pendingCommands[i].headerShown && !pendingCommands[i].completed) {
-                    QTextCursor cursor = output->textCursor();
-                    ansiToQText(cursor, formattedLine);
-                    output->moveCursor(QTextCursor::End);
-                } else {
-                    // Buffer the output for later display
-                    pendingCommands[i].outputLines.append(formattedLine);
-                }
                 break;
             }
         }
 
-        // If cmdId not found (orphan output), display it directly
-        if (!found && !cmdId.isEmpty()) {
-            // Still display it to avoid losing data (no debug log - reduces noise)
-            QTextCursor cursor = output->textCursor();
-            ansiToQText(cursor, formattedLine);
-            output->moveCursor(QTextCursor::End);
+        // Output arrived before its command_started - hold it, keyed by cmdId, and
+        // attach it when that command_started shows up (never dump it at the cursor).
+        if (!found) {
+            orphanOutput[cmdId].append(formattedLine);
         }
 
     } else if (act == QStringLiteral("session_exited")) {
@@ -450,6 +481,14 @@ void DashboardTab::flushCompletedCommands() {
             ansiToQText(cursor, line);
         }
 
+        // Surface a failure so the user can tell a failed command from an empty one.
+        if (!pc.ok) {
+            const QString msg = pc.exitCode != 0
+                ? QString("[!] Command failed (exit %1)\n").arg(pc.exitCode)
+                : QStringLiteral("[!] Command failed\n");
+            ansiToQText(cursor, QString("\x1b[31m%1\x1b[0m").arg(msg));
+        }
+
         // Add closing separator
         ansiToQText(cursor, QString("\x1b[36m─────────────────────────────────────────\x1b[0m\n"));
 
@@ -465,6 +504,9 @@ void DashboardTab::flushCompletedCommands() {
     }
 
     output->moveCursor(QTextCursor::End);
+
+    // Falling edge: no more in-flight commands - clear the "running" indicator.
+    if (pendingCommands.isEmpty()) emit runningStateChanged(false);
 }
 
 void DashboardTab::loadCommandHistory() {

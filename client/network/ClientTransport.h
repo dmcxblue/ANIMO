@@ -12,9 +12,10 @@ public:
     explicit ClientTransport(QObject *parent = nullptr);
     ~ClientTransport();
 
-    // Connect and perform login with the password (blocking helper).
+    // Connect and perform login with the operator username + password (blocking helper).
     bool connectAndLogin(const QString &host, quint16 port,
-                         const QString &password, int timeoutMs = 5000);
+                         const QString &username, const QString &password,
+                         int timeoutMs = 5000);
 
     // Existing API preserved
     void connectToServer(const QString &host, quint16 port);
@@ -60,6 +61,7 @@ private:
     QTimer *m_reconnectTimer;
     QString m_lastHost;
     quint16 m_lastPort;
+    QString m_lastUsername;
     QString m_lastPassword;
     bool m_wasAuthenticated;
 

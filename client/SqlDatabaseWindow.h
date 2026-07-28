@@ -28,6 +28,8 @@ private slots:
     void onServerSelected(int index);
     void listDatabases();
     void listFirewallRules();
+    void addMyIpFirewallRule();       // open the SQL server firewall to our public IP
+    void showResultsContextMenu(const QPoint &pos);
     void getServerDetails();
     void copySelectedItem();
     void exportResults();
@@ -88,13 +90,15 @@ private:
     QTextEdit *customQueryInput;
 
     // Current user context
-    QString selectedUpn;
+    QString selectedUpn;         // UPN of the selected session (display / back-compat)
+    QString selectedSessionId;   // the actual selection unit
     QComboBox *subscriptionCombo;
     QComboBox *serverCombo;
     QComboBox *databaseCombo;
     QPushButton *enumServersBtn;
     QPushButton *listDatabasesBtn;
     QPushButton *listFirewallBtn;
+    QPushButton *allowMyIpBtn;
     QPushButton *serverDetailsBtn;
     QPushButton *downloadSchemaBtn;
     QPushButton *downloadDataBtn;

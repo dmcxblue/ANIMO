@@ -17,6 +17,7 @@ ServerLoginWindow::ServerLoginWindow(QWidget *parent)
     QSettings settings("ANIMO", "Client");
     QString savedIp = settings.value("server/ip", "127.0.0.1").toString();
     QString savedPort = settings.value("server/port", "7777").toString();
+    QString savedUser = settings.value("operator/username").toString();
 
     ipEdit_ = new QLineEdit(this);
     ipEdit_->setText(savedIp);
@@ -26,11 +27,16 @@ ServerLoginWindow::ServerLoginWindow(QWidget *parent)
     portEdit_->setValidator(new QIntValidator(1, 65535, this));
     portEdit_->setText(savedPort);
 
+    usernameEdit_ = new QLineEdit(this);
+    usernameEdit_->setText(savedUser);
+    usernameEdit_->setMaxLength(64);
+
     passwordEdit_ = new QLineEdit(this);
     passwordEdit_->setEchoMode(QLineEdit::Password);
 
     formLayout->addRow("IP:", ipEdit_);
     formLayout->addRow("Port:", portEdit_);
+    formLayout->addRow("Operator:", usernameEdit_);
     formLayout->addRow("Password:", passwordEdit_);
 
     layout->addLayout(formLayout);
@@ -43,6 +49,7 @@ ServerLoginWindow::ServerLoginWindow(QWidget *parent)
 
 void ServerLoginWindow::onConnectClicked() {
     QString ip = ipEdit_->text().trimmed();
+    QString username = usernameEdit_->text().trimmed();
     QString password = passwordEdit_->text();
 
     bool portOk = false;
@@ -58,10 +65,17 @@ void ServerLoginWindow::onConnectClicked() {
         return;
     }
 
+    if (username.isEmpty()) {
+        QMessageBox::warning(this, "Invalid Input",
+                             "Please enter an operator handle - it identifies your activity.");
+        return;
+    }
+
     // Save connection settings for next time
     QSettings settings("ANIMO", "Client");
     settings.setValue("server/ip", ip);
     settings.setValue("server/port", QString::number(port));
+    settings.setValue("operator/username", username);
 
-    emit connectToServer(ip, port, password);
+    emit connectToServer(ip, port, username, password);
 }

@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <atomic>
+#include <functional>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTreeWidget>
@@ -30,7 +31,9 @@ private slots:
     void listKeys();
     void listCertificates();
     void getSecretValue();
+    void getKeyValue();
     void exportCertificate();
+    void showTreeContextMenu(const QPoint &pos);
     void listAccessPolicies();
     void copySelectedItem();
     void exportResults();
@@ -41,6 +44,11 @@ private slots:
 private:
     void setupUi();
     void updateTokenStatus();
+    // Remove any existing top-level group with this label so re-listing refreshes
+    // that category in place instead of appending a duplicate.
+    void removeTreeGroup(const QString &label);
+    // Seamlessly acquire a vault-audience token from the selected session's refresh token.
+    void ensureVaultToken(std::function<void(bool)> then = nullptr);
     QNetworkRequest bearerRequest(const QString &url, const QString &token);
     void appendLog(const QString &msg, const QString &color = "white");
     void setLoading(bool loading);

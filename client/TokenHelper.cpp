@@ -1,6 +1,7 @@
 #include "TokenHelper.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
+#include "SpnCredentialStore.h"
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QUrlQuery>
@@ -176,11 +177,173 @@ void TokenHelper::getTokensForResources(const QStringList &resources, MultiToken
     }
 }
 
+QString TokenHelper::getExistingTokenForSession(const QString &resource, const QString &sessionId) const
+{
+    TokenInfo token = TokenStore::instance()->getTokenForSessionAndResource(sessionId, resource);
+    return (token.isValid() && !token.isExpired()) ? token.accessToken : QString();
+}
+
+bool TokenHelper::hasValidTokenForSession(const QString &resource, const QString &sessionId) const
+{
+    TokenInfo token = TokenStore::instance()->getTokenForSessionAndResource(sessionId, resource);
+    return token.isValid() && !token.isExpired();
+}
+
+bool TokenHelper::getRefreshTokenForSession(const QString &sessionId, QString &outRefreshToken,
+                                            QString &outTenantId, QString &outUpn) const
+{
+    const QList<TokenInfo> toks = TokenStore::instance()->getAllTokensForSession(sessionId);
+    TokenInfo best;
+    bool have = false;
+    for (const TokenInfo &t : toks) {
+        if (t.refreshToken.isEmpty()) continue;
+        if (!have || t.expiresAt > best.expiresAt) { best = t; have = true; }
+    }
+    if (have) {
+        outRefreshToken = best.refreshToken;
+        outTenantId     = best.tenantId;
+        outUpn          = best.upn;
+        return true;
+    }
+    return false;
+}
+
+void TokenHelper::getTokenForResourceBySession(const QString &resource, TokenCallback callback,
+                                               const QString &sessionId, const QString &clientId)
+{
+    if (sessionId.isEmpty()) {
+        callback(false, QString(), "No session selected. Please select a session first.");
+        return;
+    }
+
+    // Reuse an existing valid token from THIS session if its audience matches.
+    QString existing = getExistingTokenForSession(resource, sessionId);
+    if (!existing.isEmpty() && NetworkHelper::validateTokenAudience(existing, resource)) {
+        callback(true, existing, QString());
+        return;
+    }
+
+    const QString requestKey = QString("%1|sess|%2").arg(resource, sessionId);
+    if (m_pendingRequests.contains(requestKey)) {
+        m_pendingRequests[requestKey].append(callback);
+        return;
+    }
+
+    // Exchange using this session's OWN refresh token (the core fix).
+    QString refreshToken, tenantId, upn;
+    if (getRefreshTokenForSession(sessionId, refreshToken, tenantId, upn)) {
+        const QString effectiveClientId = clientId.isEmpty() ? selectClientIdForResource(resource) : clientId;
+        m_pendingRequests[requestKey].append(callback);
+        exchangeRefreshToken(refreshToken, tenantId, resource,
+            [this, requestKey](bool success, const QString &accessToken, const QString &error) {
+                const QList<TokenCallback> callbacks = m_pendingRequests.take(requestKey);
+                for (const auto &cb : callbacks) cb(success, accessToken, error);
+            }, effectiveClientId, sessionId);
+        return;
+    }
+
+    // SPN client_credentials sessions have no refresh token. If we stashed the
+    // {appId, secret, tenantId} at login time, mint the requested token
+    // directly with client_credentials. The result is stored in TokenStore
+    // under the same sessionId so subsequent calls hit the cache.
+    const SpnCredentials spn = SpnCredentialStore::instance()->get(sessionId);
+    if (spn.isValid()) {
+        m_pendingRequests[requestKey].append(callback);
+
+        QString scope = resource;
+        if (!scope.endsWith('/')) scope.append('/');
+        scope.append(".default");
+
+        QUrl url(QString("https://login.microsoftonline.com/%1/oauth2/v2.0/token").arg(spn.tenantId));
+        QNetworkRequest req(url);
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        NetworkHelper::setRequestTimeout(req);
+
+        QUrlQuery form;
+        form.addQueryItem("grant_type", "client_credentials");
+        form.addQueryItem("client_id", spn.appId);
+        form.addQueryItem("client_secret", spn.secret);
+        form.addQueryItem("scope", scope);
+
+        QNetworkReply *reply = m_net->post(req, form.query(QUrl::FullyEncoded).toUtf8());
+        if (!reply) {
+            const auto callbacks = m_pendingRequests.take(requestKey);
+            for (const auto &cb : callbacks)
+                cb(false, QString(), "Failed to send SPN token request");
+            return;
+        }
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, requestKey, resource, sessionId, spn]() {
+            reply->deleteLater();
+            const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+            const QString token   = obj.value("access_token").toString();
+            const auto callbacks  = m_pendingRequests.take(requestKey);
+
+            if (reply->error() != QNetworkReply::NoError && token.isEmpty()) {
+                const QString err = obj.value("error_description")
+                                       .toString(obj.value("error").toString(reply->errorString()));
+                for (const auto &cb : callbacks) cb(false, QString(), err);
+                return;
+            }
+            if (token.isEmpty()) {
+                for (const auto &cb : callbacks)
+                    cb(false, QString(), "SPN token response had no access_token");
+                return;
+            }
+
+            // Cache into TokenStore under the same session so the next lookup
+            // is instant. UPN is left as the appId for consistency with the
+            // initial SPN login row.
+            TokenInfo info;
+            info.accessToken = token;
+            info.resource    = resource;
+            info.tenantId    = spn.tenantId;
+            info.upn         = spn.appId;
+            TokenStore::instance()->storeToken(sessionId, info);
+
+            for (const auto &cb : callbacks) cb(true, token, QString());
+        });
+        return;
+    }
+
+    callback(false, QString(),
+             QString("No refresh token and no stored SPN credentials for the selected session (%1). "
+                     "Log the same SPN in again with resource = %2 to obtain a token, or use a "
+                     "session that has a refresh token.").arg(sessionId.left(8), resource));
+}
+
+void TokenHelper::getTokensForResourcesBySession(const QStringList &resources, MultiTokenCallback callback,
+                                                 const QString &sessionId, const QString &clientId)
+{
+    if (resources.isEmpty()) { callback(true, QMap<QString, QString>(), QString()); return; }
+
+    struct Context {
+        QMap<QString, QString> tokens;
+        QStringList errors;
+        int remaining;
+        MultiTokenCallback callback;
+    };
+    auto ctx = std::make_shared<Context>();
+    ctx->remaining = resources.size();
+    ctx->callback = callback;
+
+    for (const QString &resource : resources) {
+        getTokenForResourceBySession(resource, [ctx, resource](bool ok, const QString &token, const QString &err) {
+            if (ok) ctx->tokens[resource] = token;
+            else    ctx->errors.append(QString("%1: %2").arg(resource, err));
+            if (--ctx->remaining == 0) {
+                ctx->callback(ctx->errors.isEmpty(), ctx->tokens, ctx->errors.join("\n"));
+            }
+        }, sessionId, clientId);
+    }
+}
+
 void TokenHelper::exchangeRefreshToken(const QString &refreshToken,
                                         const QString &tenantId,
                                         const QString &resource,
                                         TokenCallback callback,
-                                        const QString &clientId)
+                                        const QString &clientId,
+                                        const QString &storeSessionId)
 {
     if (refreshToken.isEmpty() || tenantId.isEmpty()) {
         callback(false, QString(), "Missing refresh token or tenant ID");
@@ -211,7 +374,7 @@ void TokenHelper::exchangeRefreshToken(const QString &refreshToken,
         return;
     }
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, resource, effectiveClientId, callback]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, resource, effectiveClientId, callback, storeSessionId]() {
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -254,9 +417,14 @@ void TokenHelper::exchangeRefreshToken(const QString &refreshToken,
             tokenInfo.upn = claims.value("preferred_username").toString();
         }
 
-        // Generate a session ID based on upn and resource (replaces any prior token for same combo)
-        QString sessionKey = QString("%1_%2").arg(tokenInfo.upn, resource);
-        TokenStore::instance()->storeToken(sessionKey, tokenInfo);
+        // Store under the REAL sessionId when known, so modules and the terminal
+        // both find it by (sessionId, resource). Fall back to a synthetic
+        // "{upn}_{resource}" key only when no sessionId was supplied (legacy paths).
+        const QString storeKey = storeSessionId.isEmpty()
+            ? QString("%1_%2").arg(tokenInfo.upn, resource)
+            : storeSessionId;
+        tokenInfo.sessionId = storeKey;
+        TokenStore::instance()->storeToken(storeKey, tokenInfo);
 
         qDebug() << "[TokenHelper] Successfully acquired token for:" << resource
                  << "clientId:" << effectiveClientId;
@@ -285,7 +453,10 @@ QString TokenHelper::selectClientIdForResource(const QString &resource)
         return AZURE_POWERSHELL_CLIENT_ID;
     }
 
-    // For other resources (Key Vault, Storage, SQL, etc.), use default Microsoft Office client
-    qDebug() << "[TokenHelper] Using default Microsoft Office client ID for resource:" << resource;
-    return DEFAULT_CLIENT_ID;
+    // Key Vault / Storage / SQL and everything else: use the Azure PowerShell client.
+    // The session refresh tokens are minted for it (management works), and the Office
+    // client (d3590ed6) gets rejected with "Bad Request" for the vault/storage audience
+    // on this tenant. This also matches the server-side exchange (Config defaultClientId).
+    qDebug() << "[TokenHelper] Using Azure PowerShell client ID for resource:" << resource;
+    return AZURE_POWERSHELL_CLIENT_ID;
 }

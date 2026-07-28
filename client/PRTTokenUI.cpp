@@ -33,7 +33,7 @@ PRTTokenUI::PRTTokenUI(QWidget *parent) : QWidget(parent) {
     layout->addWidget(new QLabel("Tenant (REQUIRED):"));
     layout->addWidget(tenant);
 
-    // Microsoft Teams — reliable default for PRT exchange
+    // Microsoft Teams - reliable default for PRT exchange
     clientId = new ClientIdSelector(this, "1fec8e78-bce4-4aaf-ab1b-5451cc387264");
     layout->addWidget(new QLabel("Client ID (choose from list or paste your own):"));
     layout->addWidget(clientId);

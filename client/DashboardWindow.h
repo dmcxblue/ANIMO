@@ -19,6 +19,7 @@
 
 class ClientTransport;
 class GraphQueryWindow;
+class QLabel;
 
 struct SessionInfo {
     QProcess *psProc = nullptr;
@@ -43,6 +44,7 @@ public:
     ~DashboardWindow() override = default;
 
     void setTransport(ClientTransport* t);
+    void setOperator(const QString &op);   // show the logged-in operator, colored
 
     void registerPsSession(const QString &sessionId, QProcess *proc, const QString &token, const QString &resource);
     SessionInfo *getSession(const QString &sessionId);
@@ -62,6 +64,7 @@ private:
     QMap<QString, SessionInfo> sessions;
 
     QTableWidget *sessionTable = nullptr;
+    QLabel *operatorChip_ = nullptr;
     QTextEdit *eventLog = nullptr;
     QTabWidget *tabs = nullptr;
 
@@ -77,6 +80,10 @@ private:
     void initUI();
     void updateExpiryDisplay();
     void refreshTokenForSession(const QString &sessionId);
+    // WS5: after renewing, mint fresh Graph/KeyVault tokens and push them into the
+    // session's terminal Az context (server no-ops for full/live sessions).
+    void reinjectTerminalTokens(const QString &sessionId, const QString &armToken,
+                                const QString &refreshToken, const QString &tenantId);
     QString formatTimeRemaining(const QDateTime &expiry) const;
     QDateTime parseTokenExpiry(const QString &accessToken) const;
 
@@ -89,7 +96,7 @@ public slots:
     void launchIllicitConsentWindow();
     void launchWebhookCaptureWindow();
     void createNewSession();
-    void addSessionRow(const QString &sessionId, const QString &username, const QString &tenantId, const QString &domain, const QString &resource, const QDateTime &expiry = QDateTime());
+    void addSessionRow(const QString &sessionId, const QString &username, const QString &tenantId, const QString &domain, const QString &resource, const QDateTime &expiry = QDateTime(), const QString &createdBy = QString());
 
     void logEvent(const QString &msg);
     void updateSessionRow(const QString &sessionId, const QString &username, const QString &tenantId, const QString &defaultDomain, const QString &resource);
@@ -121,6 +128,7 @@ public slots:
     void openMagicAppFinder();
     void openGatherAllWindow();
     void openTokenLogWindow();
+    void openActivityWindow();
     void openTokenAnalysisWindow();
     void openSessionTimelineWindow();
     void openReportDialog();
@@ -141,6 +149,7 @@ public slots:
     void openSPNEnumWindow();
     void openFunctionAppExplorer();
     void openLogicAppsViewer();
+    void openWhoAmIWindow();
 
     // Persistence features
     void openEmailRulesWindow();

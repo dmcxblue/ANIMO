@@ -15,6 +15,7 @@
 #include <QJsonDocument>
 #include <QApplication>
 #include <QClipboard>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QMessageBox>
 #include <QDebug>
@@ -68,6 +69,15 @@ DeviceCodeLoginWindow::DeviceCodeLoginWindow(DashboardWindow *dashboard, QWidget
     createSessionCheckbox->setToolTip("When enabled, automatically creates a PowerShell session after capturing tokens");
     layout->addWidget(createSessionCheckbox);
 
+    // Full server-session toggle: device code runs INSIDE Az on the server, giving a
+    // real cached context (Get-AzKeyVaultSecret / storage / Graph all work natively in
+    // the Session Tab). Overrides the client-side capture flow above.
+    fullServerSessionCheckbox = new QCheckBox("Create full server session (Connect-AzAccount -UseDeviceAuthentication)");
+    fullServerSessionCheckbox->setChecked(false);
+    fullServerSessionCheckbox->setToolTip("Runs the device code inside the server's Az context so the terminal can mint any audience.\n"
+                                          "Ignores Client ID / Resource / Scopes above - it uses Azure's own device-code app.");
+    layout->addWidget(fullServerSessionCheckbox);
+
     QPushButton *loginBtn = new QPushButton("Send Device Code Flow");
     connect(loginBtn, &QPushButton::clicked, this, &DeviceCodeLoginWindow::performDeviceCodeLogin);
     layout->addWidget(loginBtn);
@@ -84,6 +94,12 @@ DeviceCodeLoginWindow::DeviceCodeLoginWindow(DashboardWindow *dashboard, QWidget
 }
 
 void DeviceCodeLoginWindow::performDeviceCodeLogin() {
+    // Full server-session mode: hand off to the server-side Az device-code flow.
+    if (fullServerSessionCheckbox && fullServerSessionCheckbox->isChecked()) {
+        startFullServerSession();
+        return;
+    }
+
     // Validate inputs
     QString clientIdText = clientId->text().trimmed();
     if (clientIdText.isEmpty()) {
@@ -167,6 +183,40 @@ void DeviceCodeLoginWindow::performDeviceCodeLogin() {
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 
     thread->start();
+}
+
+void DeviceCodeLoginWindow::startFullServerSession() {
+    QObject *transportObj = locateTransport();
+    if (!transportObj) {
+        QMessageBox::warning(this, "No Connection", "Not connected to server.");
+        return;
+    }
+    wireTransport();
+
+    sessionHandled = false;
+    fullSessionMode = true;
+    fullSessionSid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    pendingResource = QStringLiteral("https://management.azure.com");
+
+    createStatusWidget(fullSessionSid);
+    if (statusWidgets.contains(fullSessionSid))
+        statusWidgets[fullSessionSid].label->setText("Requesting device code from server...");
+
+    QJsonObject req;
+    req.insert(Protocol::F_ACTION, Protocol::ACTION_NEW_SESSION);
+    req.insert("mode",      QStringLiteral("az_devicecode"));
+    req.insert("resource",  pendingResource);
+    req.insert("sessionId", fullSessionSid);
+    req.insert("rid",       pendingRid);
+
+    if (auto *typed = qobject_cast<ClientTransport*>(transportObj))
+        typed->sendJson(req);
+    else
+        QMetaObject::invokeMethod(transportObj, "sendJson", Q_ARG(QJsonObject, req));
+
+    if (parentDashboard)
+        parentDashboard->logEvent("[*] Starting full server session via device code...");
 }
 
 void DeviceCodeLoginWindow::createStatusWidget(const QString &labelId) {
@@ -357,6 +407,25 @@ void DeviceCodeLoginWindow::wireTransport() {
                     const QString respRid = obj.value("rid").toString();
                     const QString sid = obj.value("sessionId").toString();
 
+                    // Full-session mode: stream the server's device-code prompt live.
+                    if (fullSessionMode && act == QStringLiteral("output") && sid == fullSessionSid) {
+                        const QString data = obj.value("data").toString();
+                        if (statusWidgets.contains(fullSessionSid) && !data.trimmed().isEmpty()) {
+                            auto &sw = statusWidgets[fullSessionSid];
+                            sw.label->append(data.trimmed());
+                            static const QRegularExpression codeRe(
+                                QStringLiteral("enter the code ([A-Z0-9]{6,})"),
+                                QRegularExpression::CaseInsensitiveOption);
+                            auto m = codeRe.match(data);
+                            if (m.hasMatch() && sw.userCode.isEmpty()) {
+                                sw.userCode = m.captured(1).toUpper();
+                                sw.copyBtn->setEnabled(true);
+                                QApplication::clipboard()->setText(sw.userCode);
+                            }
+                        }
+                        return;
+                    }
+
                     // Match only our pending rid
                     if (!pendingRid.isEmpty() && !respRid.isEmpty() && respRid != pendingRid)
                         return;
@@ -371,11 +440,16 @@ void DeviceCodeLoginWindow::wireTransport() {
                         const QString domain = obj.value("domain").toString("N/A");
                         const QString res = obj.value("resource").toString("N/A");
 
+                        // In full-session mode the token is minted server-side and
+                        // arrives on the event; otherwise use the client-captured token.
+                        const QString evToken = obj.value("accessToken").toString();
+                        const QString useToken = fullSessionMode ? evToken : pendingAccessToken;
+
                         // Store token in TokenStore for the new session
                         TokenInfo tokenInfo;
-                        tokenInfo.accessToken = pendingAccessToken;
+                        tokenInfo.accessToken = useToken;
                         tokenInfo.refreshToken = pendingRefreshToken;
-                        tokenInfo.resource = pendingResource;
+                        tokenInfo.resource = fullSessionMode ? res : pendingResource;
                         TokenStore::instance()->storeToken(sid, tokenInfo);
 
                         // Update dashboard
@@ -383,18 +457,21 @@ void DeviceCodeLoginWindow::wireTransport() {
                             parentDashboard->addSessionRow(sid, user, tenantId, domain, res);
                             parentDashboard->logEvent(
                                 QString("[+] Session created from device code for %1 (ID: %2)").arg(user, sid));
-                            parentDashboard->setSessionTokenExpiry(sid, pendingAccessToken,
-                                pendingRefreshToken, pendingResource, tenantId);
+                            parentDashboard->setSessionTokenExpiry(sid, useToken,
+                                pendingRefreshToken, tokenInfo.resource, tenantId);
                         }
 
                         // Clear pending state
                         pendingAccessToken.clear();
                         pendingRefreshToken.clear();
                         pendingResource.clear();
+                        const bool wasFull = fullSessionMode;
+                        fullSessionMode = false;
+                        fullSessionSid.clear();
 
                         QMessageBox::information(this, "Session Created",
-                            QString("Session created for %1\nTenant: %2\nSession: %3")
-                            .arg(user, tenantId, sid));
+                            QString("%1 for %2\nTenant: %3\nSession: %4")
+                            .arg(wasFull ? "Full session created" : "Session created", user, tenantId, sid));
                         return;
                     }
 

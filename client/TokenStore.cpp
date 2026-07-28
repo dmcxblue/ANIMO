@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QDebug>
 #include <QRegularExpression>
+#include <algorithm>
 #include <QMutex>
 
 // Thread-safe singleton using C++11 magic statics
@@ -210,6 +211,67 @@ QStringList TokenStore::getUniqueUsers() const
         }
     }
     return users.values();
+}
+
+bool TokenStore::hasSession(const QString &sessionId) const
+{
+    return m_tokens.contains(sessionId);
+}
+
+QList<SessionSummary> TokenStore::getSessionSummaries() const
+{
+    QList<SessionSummary> out;
+    for (auto it = m_tokens.constBegin(); it != m_tokens.constEnd(); ++it) {
+        const QList<TokenInfo> &toks = it.value();
+        if (toks.isEmpty()) continue;
+
+        SessionSummary s;
+        s.sessionId = it.key();
+        s.tokenCount = toks.size();
+
+        // Identity + freshness come from the newest token in the session.
+        const TokenInfo *newest = nullptr;
+        for (const TokenInfo &t : toks) {
+            const QDateTime stamp = t.issuedAt.isValid() ? t.issuedAt : t.expiresAt;
+            if (!newest) { newest = &t; s.lastSeen = stamp; continue; }
+            const QDateTime nStamp = newest->issuedAt.isValid() ? newest->issuedAt : newest->expiresAt;
+            if (stamp.isValid() && stamp > nStamp) newest = &t;
+            if (stamp.isValid() && (!s.lastSeen.isValid() || stamp > s.lastSeen)) s.lastSeen = stamp;
+        }
+        if (newest) {
+            s.upn      = newest->upn;
+            s.tenantId = newest->tenantId;
+            s.clientId = newest->clientId;
+        }
+        // Fall back to any non-empty upn in the session.
+        if (s.upn.isEmpty()) {
+            for (const TokenInfo &t : toks) if (!t.upn.isEmpty()) { s.upn = t.upn; break; }
+        }
+        out.append(s);
+    }
+
+    // Newest sessions first.
+    std::sort(out.begin(), out.end(), [](const SessionSummary &a, const SessionSummary &b) {
+        return a.lastSeen > b.lastSeen;
+    });
+    return out;
+}
+
+TokenInfo TokenStore::getTokenForSessionAndResource(const QString &sessionId, const QString &resource) const
+{
+    if (sessionId.isEmpty()) return TokenInfo();
+    auto it = m_tokens.constFind(sessionId);
+    if (it == m_tokens.constEnd()) return TokenInfo();
+
+    for (const TokenInfo &token : it.value()) {
+        if ((token.resource == resource ||
+             token.resource.contains(resource, Qt::CaseInsensitive) ||
+             resource.contains(token.resource, Qt::CaseInsensitive)) &&
+            !token.isExpired()) {
+            return token;
+        }
+    }
+    return TokenInfo();
 }
 
 void TokenStore::removeTokensForSession(const QString &sessionId)

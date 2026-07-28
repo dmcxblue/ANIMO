@@ -21,6 +21,8 @@ struct PendingCommand {
     QStringList outputLines;  // Buffered output until command completes
     bool headerShown = false;
     bool completed = false;
+    bool ok = true;           // false if the command reported failure
+    int  exitCode = 0;        // native exit code, when applicable
 };
 
 class QTextCursor;
@@ -48,6 +50,12 @@ public:
 public slots:
     void clearConsole();
 
+signals:
+    // Emitted with `true` when a command starts executing in this tab, and
+    // `false` when the last in-flight command completes. DashboardWindow uses
+    // this to decorate the tab title (e.g. "Session abc123 ⏳").
+    void runningStateChanged(bool running);
+
 private slots:
     void runCustomQuery();
 
@@ -72,6 +80,7 @@ private:
     QString lastSentCommand;
     QString currentCmdId;  // Currently executing command ID for output correlation
     QList<PendingCommand> pendingCommands;  // Queue of commands with buffered output
+    QMap<QString, QStringList> orphanOutput;  // output that arrived before its command_started
 
     QTextEdit *output = nullptr;
     CommandLineEdit *queryInput = nullptr;

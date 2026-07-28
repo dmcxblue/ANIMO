@@ -16,12 +16,23 @@ struct TokenInfo {
     QString tenantId;
     QString upn;           // user principal name
     QString sessionId;
-    QString clientId;      // appid/azp claim — which client ID issued this token
+    QString clientId;      // appid/azp claim - which client ID issued this token
     QDateTime issuedAt;
     QDateTime expiresAt;   // parsed from JWT if available
 
     bool isValid() const { return !accessToken.isEmpty(); }
     bool isExpired() const { return expiresAt.isValid() && QDateTime::currentDateTime() > expiresAt; }
+};
+
+// One row per captured session, used to build a disambiguating picker: the same
+// UPN can appear across several sessions with different tokens.
+struct SessionSummary {
+    QString sessionId;
+    QString upn;
+    QString tenantId;
+    QString clientId;
+    QDateTime lastSeen;
+    int tokenCount = 0;
 };
 
 class TokenStore : public QObject {
@@ -55,6 +66,14 @@ public:
 
     // Get list of unique users (UPNs) with tokens
     QStringList getUniqueUsers() const;
+
+    // Session-granular access: one summary per session (newest first), and an exact
+    // token lookup scoped to a single session so same-UPN sessions don't collide.
+    QList<SessionSummary> getSessionSummaries() const;
+    TokenInfo getTokenForSessionAndResource(const QString &sessionId, const QString &resource) const;
+
+    // Check if a session has any entry (even without tokens)
+    bool hasSession(const QString &sessionId) const;
 
     // Remove tokens
     void removeTokensForSession(const QString &sessionId);

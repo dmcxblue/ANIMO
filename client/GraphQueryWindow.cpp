@@ -216,11 +216,11 @@ void GraphQueryWindow::onReplyFinished() {
 
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QByteArray raw = reply->readAll();
-    const QString pretty = prettyJson(raw);  // <<— QString, not QByteArray
+    const QString pretty = prettyJson(raw);  // <<- QString, not QByteArray
 
     QString statusText = QString("HTTP %1").arg(status);
     if (status == 0 && reply->error() != QNetworkReply::NoError) {
-        statusText += QString(" — Network error: %1").arg(reply->errorString());
+        statusText += QString(" - Network error: %1").arg(reply->errorString());
     }
     m_status->setText(statusText);
 

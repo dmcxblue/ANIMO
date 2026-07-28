@@ -5,14 +5,14 @@
 #include <QString>
 
 // Editable combo box seeded with 10 confirmed FOCI-1 (Family Of Client IDs)
-// Microsoft first-party apps. FOCI apps share a family_refresh_token — any
+// Microsoft first-party apps. FOCI apps share a family_refresh_token - any
 // FOCI client ID can redeem any other FOCI app's refresh token, which is what
 // makes these useful for cross-resource token pivots.
 //
 // Source: https://github.com/secureworks/family-of-client-ids-research
 // Cross-referenced with TokenTacticsV2.
 //
-// Users can still type or paste any custom client ID — the combo is
+// Users can still type or paste any custom client ID - the combo is
 // editable. Read the effective value via currentClientId(), which extracts
 // the GUID from the selected entry OR from free-text input.
 class ClientIdSelector : public QComboBox {

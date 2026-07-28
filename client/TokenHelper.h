@@ -53,15 +53,32 @@ public:
     // Get list of available users with tokens
     QStringList getAvailableUsers() const;
 
-    // Exchange refresh token for new access token
+    // Session-scoped variants: resolve the token from ONE specific session so that
+    // same-UPN sessions with different tokens (and different refresh tokens) can't
+    // collide. If the session lacks a token for the resource, the exchange uses that
+    // session's own refresh token.
+    void getTokenForResourceBySession(const QString &resource, TokenCallback callback,
+                                      const QString &sessionId, const QString &clientId = QString());
+    void getTokensForResourcesBySession(const QStringList &resources, MultiTokenCallback callback,
+                                        const QString &sessionId, const QString &clientId = QString());
+    QString getExistingTokenForSession(const QString &resource, const QString &sessionId) const;
+    bool hasValidTokenForSession(const QString &resource, const QString &sessionId) const;
+    bool getRefreshTokenForSession(const QString &sessionId, QString &outRefreshToken,
+                                   QString &outTenantId, QString &outUpn) const;
+
+    // Exchange refresh token for new access token. If storeSessionId is given, the
+    // minted token is stored in TokenStore under that REAL sessionId so both the
+    // modules and the terminal-injection path can find it by (sessionId, resource).
+    // When empty, it falls back to a synthetic "{upn}_{resource}" key (legacy).
     void exchangeRefreshToken(const QString &refreshToken,
                               const QString &tenantId,
                               const QString &resource,
                               TokenCallback callback,
-                              const QString &clientId = QString());
+                              const QString &clientId = QString(),
+                              const QString &storeSessionId = QString());
 
 signals:
-    // Emitted when a token is exchanged via refresh token — allows server-side logging
+    // Emitted when a token is exchanged via refresh token - allows server-side logging
     void tokenExchanged(const QString &accessToken, const QString &refreshToken,
                         const QString &upn, const QString &tenantId,
                         const QString &resource);

@@ -18,6 +18,8 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QMessageBox>
+#include <QMenu>
+#include <QRegularExpression>
 #include <QFileDialog>
 #include <QTextStream>
 #include <QDateTime>
@@ -235,6 +237,9 @@ void SqlDatabaseWindow::setupUi() {
     listDatabasesBtn->setEnabled(false);
     listFirewallBtn = new QPushButton("Firewall Rules", this);
     listFirewallBtn->setEnabled(false);
+    allowMyIpBtn = new QPushButton("Allow My IP", this);
+    allowMyIpBtn->setToolTip("Add an Azure SQL firewall rule for your current public IP so you can reach the databases");
+    allowMyIpBtn->setEnabled(false);
     serverDetailsBtn = new QPushButton("Server Details", this);
     serverDetailsBtn->setEnabled(false);
     downloadSchemaBtn = new QPushButton("Download Schema", this);
@@ -246,6 +251,7 @@ void SqlDatabaseWindow::setupUi() {
 
     controlLayout2->addWidget(listDatabasesBtn);
     controlLayout2->addWidget(listFirewallBtn);
+    controlLayout2->addWidget(allowMyIpBtn);
     controlLayout2->addWidget(serverDetailsBtn);
     controlLayout2->addWidget(downloadSchemaBtn);
     controlLayout2->addWidget(downloadDataBtn);
@@ -273,6 +279,9 @@ void SqlDatabaseWindow::setupUi() {
     resultsTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
     resultsTree->setAlternatingRowColors(true);
     resultsTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    resultsTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(resultsTree, &QTreeWidget::customContextMenuRequested,
+            this, &SqlDatabaseWindow::showResultsContextMenu);
     splitter->addWidget(resultsTree);
 
     // Log output
@@ -289,6 +298,7 @@ void SqlDatabaseWindow::setupUi() {
             this, &SqlDatabaseWindow::onServerSelected);
     connect(listDatabasesBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::listDatabases);
     connect(listFirewallBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::listFirewallRules);
+    connect(allowMyIpBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::addMyIpFirewallRule);
     connect(serverDetailsBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::getServerDetails);
     connect(downloadSchemaBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::downloadDatabaseSchema);
     connect(downloadDataBtn, &QPushButton::clicked, this, &SqlDatabaseWindow::downloadTableData);
@@ -351,6 +361,7 @@ void SqlDatabaseWindow::setLoading(bool loading) {
     enumServersBtn->setEnabled(!loading);
     listDatabasesBtn->setEnabled(!loading && !currentServerId.isEmpty());
     listFirewallBtn->setEnabled(!loading && !currentServerId.isEmpty());
+    allowMyIpBtn->setEnabled(!loading && !currentServerId.isEmpty());
     serverDetailsBtn->setEnabled(!loading && !currentServerId.isEmpty());
     downloadSchemaBtn->setEnabled(!loading && (databaseCombo->currentIndex() >= 0 || isCredentialMode()));
     downloadDataBtn->setEnabled(!loading && (databaseCombo->currentIndex() >= 0 || isCredentialMode()));
@@ -369,10 +380,10 @@ void SqlDatabaseWindow::checkExistingTokens() {
     // Populate user selector
     refreshUserList();
 
-    // If a user is selected, check for their existing tokens
-    if (!selectedUpn.isEmpty()) {
-        QString mgmtToken = TokenHelper::instance()->getExistingToken(TokenHelper::RESOURCE_MANAGEMENT, selectedUpn);
-        QString sqlToken = TokenHelper::instance()->getExistingToken(TokenHelper::RESOURCE_SQL_DATABASE, selectedUpn);
+    // If a session is selected, check for its existing tokens
+    if (!selectedSessionId.isEmpty()) {
+        QString mgmtToken = TokenHelper::instance()->getExistingTokenForSession(TokenHelper::RESOURCE_MANAGEMENT, selectedSessionId);
+        QString sqlToken = TokenHelper::instance()->getExistingTokenForSession(TokenHelper::RESOURCE_SQL_DATABASE, selectedSessionId);
 
         if (!mgmtToken.isEmpty()) {
             mgmtTokenInput->setText(mgmtToken);
@@ -390,28 +401,43 @@ void SqlDatabaseWindow::checkExistingTokens() {
 
 void SqlDatabaseWindow::refreshUserList() {
     userSelector->blockSignals(true);
-    QString previousSelection = selectedUpn;
+    const QString previousSession = selectedSessionId;
     userSelector->clear();
 
-    QStringList users = TokenHelper::instance()->getAvailableUsers();
-    if (users.isEmpty()) {
+    const QList<SessionSummary> sessions = TokenStore::instance()->getSessionSummaries();
+    if (sessions.isEmpty()) {
         userSelector->addItem("No authenticated sessions", "");
         appendLog("No authenticated sessions found. Please login first.", "orange");
     } else {
-        userSelector->addItem("Select a user...", "");
-        for (const QString &user : users) {
-            userSelector->addItem(user, user);
+        // Disambiguate only when a UPN spans more than one session.
+        QHash<QString, int> perUpn;
+        for (const SessionSummary &s : sessions) perUpn[s.upn.toLower()]++;
+
+        userSelector->addItem("Select a session...", "");
+        for (const SessionSummary &s : sessions) {
+            QString label = s.upn.isEmpty() ? QStringLiteral("(no user)") : s.upn;
+            if (s.upn.isEmpty() || perUpn.value(s.upn.toLower()) > 1) {
+                QStringList disc;
+                if (!s.tenantId.isEmpty()) disc << "tid:" + s.tenantId.left(8);
+                disc << "sid:" + s.sessionId.left(8);
+                if (s.lastSeen.isValid()) disc << s.lastSeen.toString("hh:mm");
+                label += "   [" + disc.join(", ") + "]";
+            }
+            const int idx = userSelector->count();
+            userSelector->addItem(label, s.sessionId);
+            userSelector->setItemData(idx, s.upn, Qt::UserRole + 1);
         }
 
-        // Restore previous selection if it still exists
-        int idx = userSelector->findData(previousSelection);
-        if (idx >= 0) {
-            userSelector->setCurrentIndex(idx);
-        } else if (users.size() == 1) {
-            // Auto-select if only one user
+        const int rIdx = previousSession.isEmpty() ? -1 : userSelector->findData(previousSession);
+        if (rIdx >= 0) {
+            userSelector->setCurrentIndex(rIdx);
+            selectedSessionId = previousSession;
+            selectedUpn = userSelector->itemData(rIdx, Qt::UserRole + 1).toString();
+        } else if (sessions.size() == 1) {
             userSelector->setCurrentIndex(1);
-            selectedUpn = users.first();
-            appendLog(QString("Auto-selected user: %1").arg(selectedUpn), "cyan");
+            selectedSessionId = sessions.first().sessionId;
+            selectedUpn = sessions.first().upn;
+            appendLog(QString("Auto-selected session for %1").arg(selectedUpn), "cyan");
         }
     }
 
@@ -419,26 +445,28 @@ void SqlDatabaseWindow::refreshUserList() {
 }
 
 void SqlDatabaseWindow::onUserSelected(int index) {
-    QString newUpn = userSelector->itemData(index).toString();
-    if (newUpn == selectedUpn) return;
+    const QString newSession = userSelector->itemData(index).toString();
+    if (newSession == selectedSessionId) return;
 
-    selectedUpn = newUpn;
+    selectedSessionId = newSession;
+    selectedUpn = userSelector->itemData(index, Qt::UserRole + 1).toString();
 
-    // Clear token fields when switching users
+    // Clear token fields when switching sessions
     mgmtTokenInput->clear();
     sqlTokenInput->clear();
 
-    if (selectedUpn.isEmpty()) {
-        appendLog("No user selected", "gray");
+    if (selectedSessionId.isEmpty()) {
+        selectedUpn.clear();
+        appendLog("No session selected", "gray");
         updateTokenStatus();
         return;
     }
 
-    appendLog(QString("Switched to user: %1").arg(selectedUpn), "cyan");
+    appendLog(QString("Switched to session for %1").arg(selectedUpn.isEmpty() ? QStringLiteral("unknown") : selectedUpn), "cyan");
 
-    // Check for existing tokens for this user
-    QString mgmtToken = TokenHelper::instance()->getExistingToken(TokenHelper::RESOURCE_MANAGEMENT, selectedUpn);
-    QString sqlToken = TokenHelper::instance()->getExistingToken(TokenHelper::RESOURCE_SQL_DATABASE, selectedUpn);
+    // Check for existing tokens for this session
+    QString mgmtToken = TokenHelper::instance()->getExistingTokenForSession(TokenHelper::RESOURCE_MANAGEMENT, selectedSessionId);
+    QString sqlToken = TokenHelper::instance()->getExistingTokenForSession(TokenHelper::RESOURCE_SQL_DATABASE, selectedSessionId);
 
     if (!mgmtToken.isEmpty()) {
         mgmtTokenInput->setText(mgmtToken);
@@ -482,27 +510,27 @@ void SqlDatabaseWindow::updateTokenStatus() {
 }
 
 void SqlDatabaseWindow::autoFetchTokens() {
-    // Check if a user is selected
-    if (selectedUpn.isEmpty()) {
-        QMessageBox::warning(this, "No User Selected",
-            "Please select a user from the dropdown first.\n\n"
-            "If no users are available, please authenticate using:\n"
+    // Check if a session is selected
+    if (selectedSessionId.isEmpty()) {
+        QMessageBox::warning(this, "No Session Selected",
+            "Please select a session from the dropdown first.\n\n"
+            "If no sessions are available, please authenticate using:\n"
             "- Credential Login\n"
             "- Device Code Login\n"
             "- Token Login with refresh token");
         return;
     }
 
-    // Check if we have a refresh token for the selected user
+    // Check if we have a refresh token for the selected session
     QString refreshToken, tenantId, upn;
-    if (!TokenHelper::instance()->getBestRefreshToken(refreshToken, tenantId, upn, selectedUpn)) {
+    if (!TokenHelper::instance()->getRefreshTokenForSession(selectedSessionId, refreshToken, tenantId, upn)) {
         QMessageBox::warning(this, "No Refresh Token",
-            QString("No refresh token available for user: %1\n\n"
-                    "Please re-authenticate this user.").arg(selectedUpn));
+            QString("No refresh token available for the selected session (%1).\n\n"
+                    "Please re-authenticate.").arg(selectedSessionId.left(8)));
         return;
     }
 
-    appendLog(QString("Fetching tokens for user: %1").arg(selectedUpn), "cyan");
+    appendLog(QString("Fetching tokens for session %1 (%2)").arg(selectedSessionId.left(8), selectedUpn), "cyan");
     setLoading(true);
     autoFetchBtn->setEnabled(false);
     autoFetchBtn->setText("Fetching tokens...");
@@ -513,7 +541,7 @@ void SqlDatabaseWindow::autoFetchTokens() {
         TokenHelper::RESOURCE_SQL_DATABASE
     };
 
-    TokenHelper::instance()->getTokensForResources(resources,
+    TokenHelper::instance()->getTokensForResourcesBySession(resources,
         [this](bool success, const QMap<QString, QString> &tokens, const QString &error) {
             setLoading(false);
             autoFetchBtn->setEnabled(true);
@@ -543,7 +571,7 @@ void SqlDatabaseWindow::autoFetchTokens() {
             if (!error.isEmpty()) {
                 appendLog("Some tokens failed: " + error, "orange");
             }
-        }, selectedUpn);  // Pass the selected user
+        }, selectedSessionId);  // resolve against the selected session
 }
 
 // ============================================================================
@@ -767,6 +795,7 @@ void SqlDatabaseWindow::onServerSelected(int index) {
 
         listDatabasesBtn->setEnabled(true);
         listFirewallBtn->setEnabled(true);
+        allowMyIpBtn->setEnabled(true);
         serverDetailsBtn->setEnabled(true);
         appendLog(QString("[*] Selected server: %1").arg(currentServerName), "cyan");
 
@@ -915,6 +944,74 @@ void SqlDatabaseWindow::listFirewallRules() {
 
         fwGroup->setExpanded(true);
     });
+}
+
+void SqlDatabaseWindow::addMyIpFirewallRule() {
+    QString token = mgmtTokenInput->text().trimmed();
+    if (token.isEmpty() || currentServerId.isEmpty()) {
+        QMessageBox::warning(this, "Not Ready", "Select a SQL server and ensure a Management token is loaded.");
+        return;
+    }
+
+    setLoading(true);
+    appendLog("[*] Detecting public IP...", "cyan");
+
+    // Detect our public IP, then PUT a firewall rule for it.
+    QNetworkReply *ipReply = net->get(QNetworkRequest(QUrl("https://api.ipify.org")));
+    if (!ipReply) { appendLog("[-] Failed to query public IP", "red"); setLoading(false); return; }
+
+    connect(ipReply, &QNetworkReply::finished, this, [this, ipReply, token]() {
+        ipReply->deleteLater();
+        const QString ip = QString::fromUtf8(ipReply->readAll()).trimmed();
+        static const QRegularExpression ipRe(QStringLiteral("^\\d{1,3}(\\.\\d{1,3}){3}$"));
+        if (ipReply->error() != QNetworkReply::NoError || !ipRe.match(ip).hasMatch()) {
+            appendLog("[-] Could not determine public IP (check connectivity).", "red");
+            setLoading(false);
+            return;
+        }
+        appendLog(QString("[+] Public IP: %1 - adding firewall rule...").arg(ip), "cyan");
+
+        const QString ruleName = QString("ANIMO_%1").arg(QString(ip).replace('.', '_'));
+        const QString url = QString("https://management.azure.com%1/firewallRules/%2?api-version=2021-11-01")
+                                .arg(currentServerId, ruleName);
+        QJsonObject props{ {"startIpAddress", ip}, {"endIpAddress", ip} };
+        QJsonObject body{ {"properties", props} };
+
+        QNetworkReply *put = net->sendCustomRequest(
+            bearerRequest(url, token), "PUT", QJsonDocument(body).toJson());
+        if (!put) { appendLog("[-] Failed to send firewall request", "red"); setLoading(false); return; }
+
+        connect(put, &QNetworkReply::finished, this, [this, put, ip]() {
+            put->deleteLater();
+            setLoading(false);
+            QString errorMsg;
+            if (!NetworkHelper::isReplySuccess(put, &errorMsg)) {
+                appendLog(QString("[-] Firewall rule failed: %1").arg(NetworkHelper::parseApiError(put)), "red");
+                return;
+            }
+            appendLog(QString("[+] Firewall rule added for %1. It may take up to ~5 min to take effect.").arg(ip), "green");
+        });
+    });
+}
+
+void SqlDatabaseWindow::showResultsContextMenu(const QPoint &pos) {
+    QTreeWidgetItem *item = resultsTree->itemAt(pos);
+    if (!item) return;
+    resultsTree->setCurrentItem(item);
+
+    const QString type = item->text(1);
+    QMenu menu(this);
+    if (type == "Table" || type == "View") {
+        menu.addAction("View Data (Top rows)", this, &SqlDatabaseWindow::downloadTableData);
+    } else if (item->parent() && (item->parent()->text(1) == "Table" || item->parent()->text(1) == "View")) {
+        menu.addAction("View Table Data (Top rows)", this, &SqlDatabaseWindow::downloadTableData);
+    }
+    if (item->text(1) == "SQL Server" || !currentServerId.isEmpty()) {
+        menu.addAction("Allow My IP (firewall)", this, &SqlDatabaseWindow::addMyIpFirewallRule);
+    }
+    menu.addAction("Copy", this, &SqlDatabaseWindow::copySelectedItem);
+    if (!menu.isEmpty())
+        menu.exec(resultsTree->viewport()->mapToGlobal(pos));
 }
 
 void SqlDatabaseWindow::getServerDetails() {
