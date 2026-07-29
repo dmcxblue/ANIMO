@@ -79,6 +79,7 @@ ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines *
 | Qt6 | 6.2+ (Widgets, Network, WebEngineWidgets, Sql) |
 | CMake | 3.16+ |
 | PowerShell | 7.x (`pwsh`) |
+| Azure CLI | 2.x (`az`) — optional but recommended for parity |
 | Python | 3.8+ with `msal`, `requests` |
 
 ### Install & Build

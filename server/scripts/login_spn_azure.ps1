@@ -29,6 +29,24 @@ try {
         Write-Output "[Animo] a role (Reader is enough for enumeration) on a subscription, RG, or resource."
     }
 
+    # Also log az cli in with the same SPN creds so operators can use az one-liners
+    # in the same terminal (az cli maintains a separate token cache from Az PS).
+    # Silent no-op if az isn't on PATH.
+    try {
+        if (Get-Command az -EA SilentlyContinue) {
+            $azOut = (& az login --service-principal -u $AppId -p $ClientSecret --tenant $TenantId --allow-no-subscriptions --output none) 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Output "[Animo] az cli logged in as SPN (both Az PS and az cli contexts active)"
+            } else {
+                Write-Output ("[Animo] az cli login failed (exit {0}): {1}" -f $LASTEXITCODE, ($azOut | Out-String).Trim())
+            }
+        } else {
+            Write-Output "[Animo] az cli not installed; skipping az login (Az PS context is active)"
+        }
+    } catch {
+        Write-Output "[Animo] az cli login error: $($_.Exception.Message)"
+    }
+
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
         try{

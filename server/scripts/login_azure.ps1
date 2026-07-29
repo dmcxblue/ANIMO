@@ -12,6 +12,25 @@ try {
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
         try{$t=(Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
+        # Also log az cli in with the same ROPC creds so operators can use az one-liners
+        # in the same terminal (az cli keeps a separate token cache from Az PS).
+        try {
+            if (Get-Command az -EA SilentlyContinue) {
+                $tenantId = if ($ctx.Tenant) { $ctx.Tenant.Id } else { $null }
+                $azArgs = @('login','-u',$Username,'-p',$Password,'--output','none')
+                if ($tenantId) { $azArgs += @('--tenant', $tenantId) }
+                $azOut = (& az @azArgs) 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Output "[Animo] az cli logged in (both Az PS and az cli contexts active)"
+                } else {
+                    Write-Output ("[Animo] az cli login failed (exit {0}): {1}" -f $LASTEXITCODE, ($azOut | Out-String).Trim())
+                }
+            } else {
+                Write-Output "[Animo] az cli not installed; skipping az login (Az PS context is active)"
+            }
+        } catch {
+            Write-Output "[Animo] az cli login error: $($_.Exception.Message)"
+        }
         Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"
     }
     else{Write-Output "__ANIMO_LOGIN_FAIL__:No context"}

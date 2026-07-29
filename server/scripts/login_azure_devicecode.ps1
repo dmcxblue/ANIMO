@@ -13,6 +13,15 @@ try {
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
         try{$t=(Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
+        # az cli is a separate binary with its own token cache. For device-code
+        # login we deliberately don't call `az login` here - it would prompt the
+        # operator for a SECOND device code, which is confusing. If they need az
+        # cli in the same session, they can run the printed one-liner.
+        try {
+            if (Get-Command az -EA SilentlyContinue) {
+                Write-Output "[Animo] To use az cli in this session run:  az login --use-device-code --tenant $($ctx.Tenant.Id)"
+            }
+        } catch {}
         Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"
     }
     else{Write-Output "__ANIMO_LOGIN_FAIL__:No context after device-code login"}
