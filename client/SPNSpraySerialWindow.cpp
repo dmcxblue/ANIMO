@@ -1,4 +1,5 @@
 #include "SPNSpraySerialWindow.h"
+#include "WhoAmiInsights.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -115,6 +116,20 @@ SPNSpraySerialWindow::SPNSpraySerialWindow(QWidget *parent)
     output = new QTextEdit(this);
     output->setReadOnly(true);
     main->addWidget(output, 1);
+
+    // Autofill tenant from WhoAmiInsights when a fresh snapshot lands (or
+    // one already exists). The default placeholder "common" is treated as
+    // empty so autofill can overwrite it without stomping a real tenant
+    // the operator has already typed.
+    auto autofill = [this](bool force) {
+        const auto snap = WhoAmiInsights::instance()->latest();
+        if (!snap.isValid() || snap.userTid.isEmpty()) return;
+        const bool overrideCommon = tenantEdit->text().trimmed() == QLatin1String("common");
+        WhoAmiInsights::autofillLineEdit(tenantEdit, snap.userTid, force || overrideCommon);
+    };
+    connect(WhoAmiInsights::instance(), &WhoAmiInsights::insightsUpdated,
+            this, [autofill](const QString &){ autofill(false); });
+    autofill(false);
 }
 
 // ---------------- Cancel / State ----------------

@@ -1,6 +1,7 @@
 #include "DeviceJoinWindow.h"
 #include "NetworkHelper.h"
 #include "StyleManager.h"
+#include "WhoAmiInsights.h"
 #include "../shared/DeviceCryptoHelper.h"
 #include "../shared/DeviceStore.h"
 
@@ -36,6 +37,18 @@ DeviceJoinWindow::DeviceJoinWindow(QWidget *parent)
     setWindowTitle("Device Join (DRS)");
     setupUi();
     refreshStoredList();
+
+    // WhoAmiInsights autofill: tenant domain drops into tenantDomainInput
+    // when a WhoAmI run completes (or one has already completed).
+    auto autofill = [this](bool force) {
+        const auto snap = WhoAmiInsights::instance()->latest();
+        if (!snap.isValid()) return;
+        WhoAmiInsights::autofillLineEdit(tenantDomainInput,
+            snap.tenantDefaultDomain, force);
+    };
+    connect(WhoAmiInsights::instance(), &WhoAmiInsights::insightsUpdated,
+            this, [autofill](const QString &){ autofill(false); });
+    autofill(false);
 }
 
 void DeviceJoinWindow::setupUi() {

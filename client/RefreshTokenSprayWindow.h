@@ -49,6 +49,9 @@ private:
     void addResult(const QString &appName, const QString &appId, bool success,
                    const QString &scopes, const QString &error = QString());
     void setLoading(bool loading);
+    // Fill tenantInput from the last WhoAmiInsights snapshot when empty
+    // (force=true also overwrites operator edits).
+    void autofillFromInsights(bool force = false);
 
     QVBoxLayout *mainLayout;
     UserSelectorWidget *userSelector;

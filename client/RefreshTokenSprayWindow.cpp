@@ -4,6 +4,7 @@
 #include "UserSelectorWidget.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
+#include "WhoAmiInsights.h"
 #include "../shared/Protocol.h"
 
 #include <QHeaderView>
@@ -31,6 +32,18 @@ RefreshTokenSprayWindow::RefreshTokenSprayWindow(QWidget *parent)
     connect(sprayTimer, &QTimer::timeout, this, &RefreshTokenSprayWindow::processNextApp);
     setupUi();
     loadAppList();
+
+    // Subscribe to WhoAmI insights - fills tenantInput automatically when
+    // a WhoAmI run completes. Also pull the current snapshot if one exists.
+    connect(WhoAmiInsights::instance(), &WhoAmiInsights::insightsUpdated,
+            this, [this](const QString &){ autofillFromInsights(/*force=*/false); });
+    autofillFromInsights(/*force=*/false);
+}
+
+void RefreshTokenSprayWindow::autofillFromInsights(bool force) {
+    const auto snap = WhoAmiInsights::instance()->latest();
+    if (!snap.isValid()) return;
+    WhoAmiInsights::autofillLineEdit(tenantInput, snap.userTid, force);
 }
 
 RefreshTokenSprayWindow::~RefreshTokenSprayWindow()

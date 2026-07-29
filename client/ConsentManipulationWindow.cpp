@@ -4,6 +4,7 @@
 #include "TokenStore.h"
 #include "NetworkHelper.h"
 #include "WindowHelper.h"
+#include "WhoAmiInsights.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -29,6 +30,18 @@ ConsentManipulationWindow::ConsentManipulationWindow(QWidget *parent)
     setWindowTitle("Consent Manipulation (Post-Exploitation)");
     setupUi();
     updateTokenStatus();
+
+    // WhoAmiInsights autofill: fill principalIdInput with the operator's
+    // own oid as a working baseline for AllPrincipals=No grants targeting
+    // self. Operators usually change it to a real target.
+    auto autofill = [this](bool force) {
+        const auto snap = WhoAmiInsights::instance()->latest();
+        if (!snap.isValid()) return;
+        WhoAmiInsights::autofillLineEdit(principalIdInput, snap.userOid, force);
+    };
+    connect(WhoAmiInsights::instance(), &WhoAmiInsights::insightsUpdated,
+            this, [autofill](const QString &){ autofill(false); });
+    autofill(false);
 }
 
 ConsentManipulationWindow::~ConsentManipulationWindow() {

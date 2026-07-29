@@ -1,6 +1,7 @@
 #include "AuthMethodPersistenceWindow.h"
 #include "NetworkHelper.h"
 #include "StyleManager.h"
+#include "WhoAmiInsights.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -91,6 +92,20 @@ AuthMethodPersistenceWindow::AuthMethodPersistenceWindow(QWidget *parent)
 {
     setWindowTitle("Auth Method Persistence (TAP / Backdoor MFA)");
     setupUi();
+
+    // WhoAmI autofill: prefill targetInput with the operator's own UPN as
+    // a working baseline. Operators typically change it to the actual
+    // target user, but starting non-empty lets them click Resolve straight
+    // away for smoke-testing without any typing.
+    auto autofill = [this](bool force) {
+        const auto snap = WhoAmiInsights::instance()->latest();
+        if (!snap.isValid()) return;
+        const QString value = !snap.userUpn.isEmpty() ? snap.userUpn : snap.userOid;
+        WhoAmiInsights::autofillLineEdit(targetInput, value, force);
+    };
+    connect(WhoAmiInsights::instance(), &WhoAmiInsights::insightsUpdated,
+            this, [autofill](const QString &){ autofill(false); });
+    autofill(false);
 }
 
 void AuthMethodPersistenceWindow::setupUi() {
