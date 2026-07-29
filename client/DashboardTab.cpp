@@ -246,6 +246,14 @@ void DashboardTab::runCustomQuery() {
 }
 
 void DashboardTab::ansiToQText(QTextCursor &cursor, const QString &text) {
+    // Force insertion at the very end of the document. When the operator clicks
+    // into the read-only output pane (e.g. to select/copy a previous line), the
+    // widget's caret moves to the click position. `output->textCursor()` returns
+    // *that* position - so without this move-to-end, new output inserts wherever
+    // the operator last clicked, shifting subsequent blocks visually into the
+    // wrong slots. Locking to End here is idempotent and cheap.
+    cursor.movePosition(QTextCursor::End);
+
     QString remaining = text;
     QTextCharFormat format;
 
