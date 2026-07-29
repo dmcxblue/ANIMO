@@ -43,6 +43,9 @@
 #include <QUrlQuery>
 #include <QVBoxLayout>
 
+#include <atomic>
+#include <memory>
+
 namespace {
 
 // wids claim -> friendly Entra directory-role name. Kept short - the goal is a
@@ -1160,8 +1163,31 @@ void WhoAmIWindow::loadRbacActions() {
     ).arg(escOid);
 
     m_pending++;
+
+    // PsSessionRunner is fire-and-forget with no built-in timeout - if the
+    // session pwsh is inactive, dying, or the command_complete frame gets
+    // lost, the callback never fires and m_pending stays stuck. That would
+    // starve checkComplete() forever and WhoAmiInsights would never publish.
+    // A 45s wall-clock cap breaks the deadlock cleanly. Whichever of the
+    // real callback or the timeout fires first "wins" via a shared bool;
+    // the other becomes a no-op.
+    auto done = std::make_shared<std::atomic_bool>(false);
+
+    QTimer::singleShot(45000, this, [this, done]() {
+        bool expected = false;
+        if (!done->compare_exchange_strong(expected, true)) return;
+        m_pending--;
+        m_actionsLoaded = true;
+        logWarning("Fine-grained RBAC actions timed out after 45s "
+                   "(session pwsh unresponsive?). Proceeding without them - "
+                   "role-name-based derivations still populate the Capabilities tab.");
+        checkComplete();
+    });
+
     PsSessionRunner::run(this, sid, script,
-        [this](bool ok, const QJsonValue &json, const QString &raw) {
+        [this, done](bool ok, const QJsonValue &json, const QString &raw) {
+            bool expected = false;
+            if (!done->compare_exchange_strong(expected, true)) return;
             m_pending--;
             m_actionsLoaded = true;
             if (!ok || !json.isArray()) {
