@@ -2334,16 +2334,60 @@ void WhoAmIWindow::checkComplete() {
             if (lastSpace >= 0) snap.tenantDefaultDomain = txt.mid(lastSpace + 1);
         }
 
-        // RBAC scopes: walk rbacTable rows into typed RbacScope entries.
-        // Column layout (per addRbacRow): 0=subscription, 1=scope, 2=role,
+        // RBAC scopes: merge TWO sources so Post-Ex autofill works even when
+        // one path returns nothing.
+        //   (a) rbacTable rows - filled by loadRbac() via the ARM
+        //       subscription-crawl. Requires Microsoft.Resources/subscriptions/
+        //       read and Microsoft.Authorization/roleAssignments/read; narrow-
+        //       scope SPNs often return empty here.
+        //   (b) m_rbacActionRows - filled by loadRbacActions() via `az role
+        //       assignment list --all --assignee <oid>`, which lists
+        //       assignments directly by principal without a subscription crawl.
+        //       For narrow-scope SPNs this is often the ONLY source that has
+        //       data.
+        // Dedup by (scope|role) so an assignment showing up in both paths
+        // isn't double-counted.
+        auto extractSubscription = [](const QString &scope) -> QString {
+            // "/subscriptions/{GUID}/resourceGroups/..." -> "{GUID}".
+            // Also handles tenant-scope (/) and management-group scopes
+            // (returns empty for those).
+            static const QRegularExpression re(
+                QStringLiteral("^/subscriptions/([0-9a-fA-F-]{36})"));
+            const auto m = re.match(scope);
+            return m.hasMatch() ? m.captured(1) : QString();
+        };
+
+        QSet<QString> seen;
+        auto push = [&](const QString &sub, const QString &scope,
+                        const QString &role, const QString &type) {
+            if (scope.isEmpty()) return;
+            const QString key = scope + '|' + role;
+            if (seen.contains(key)) return;
+            seen.insert(key);
+            WhoAmiInsights::RbacScope rs;
+            rs.subscriptionId = sub;
+            rs.scope          = scope;
+            rs.roleName       = role;
+            rs.roleType       = type;
+            snap.rbacScopes.append(rs);
+        };
+
+        // (a) rbacTable - columns: 0=subscription, 1=scope, 2=role,
         // 3=roleType, 4=principalType.
         for (int r = 0; r < rbacTable->rowCount(); ++r) {
-            WhoAmiInsights::RbacScope rs;
-            if (auto *it = rbacTable->item(r, 0)) rs.subscriptionId = it->text();
-            if (auto *it = rbacTable->item(r, 1)) rs.scope          = it->text();
-            if (auto *it = rbacTable->item(r, 2)) rs.roleName       = it->text();
-            if (auto *it = rbacTable->item(r, 3)) rs.roleType       = it->text();
-            snap.rbacScopes.append(rs);
+            const QString sub  = rbacTable->item(r, 0) ? rbacTable->item(r, 0)->text() : QString();
+            const QString sc   = rbacTable->item(r, 1) ? rbacTable->item(r, 1)->text() : QString();
+            const QString role = rbacTable->item(r, 2) ? rbacTable->item(r, 2)->text() : QString();
+            const QString typ  = rbacTable->item(r, 3) ? rbacTable->item(r, 3)->text() : QString();
+            push(sub, sc, role, typ);
+        }
+
+        // (b) m_rbacActionRows (az cli / Az PS) - subscription is derived
+        // from the scope string because the row doesn't carry it separately.
+        for (const QJsonObject &row : m_rbacActionRows) {
+            const QString sc   = row.value("scope").toString();
+            const QString role = row.value("roleName").toString();
+            push(extractSubscription(sc), sc, role, QString());
         }
 
         // Owned apps: walk ownedTree top-level items whose column 0 is
