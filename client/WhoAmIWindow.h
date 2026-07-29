@@ -86,6 +86,7 @@ private:
     void loadOwnedGroupMembers(const QString &graphToken, const QString &groupId,
                                QTreeWidgetItem *anchor);
     void loadDirectoryRoleAssignments(const QString &graphToken);
+    void loadAuthorizationPolicy(const QString &graphToken);
 
     void resolveRoleDefinition(const QString &mgmtToken, const QString &roleDefId,
                                std::function<void(const QString &name, const QString &type)> cb);
@@ -103,6 +104,7 @@ private:
     void addRbacRow(const QString &sub, const QString &scope, const QString &role,
                     const QString &roleType, const QString &principalType);
     void deriveResetCapability();  // pure client-side, no API call
+    void renderCapabilities();     // derives yes/no capability verdicts
 
     void checkComplete();
     void applyFilter(QTreeWidget *tree, QLineEdit *edit);
@@ -122,6 +124,10 @@ private:
     QLabel *tenantHeader = nullptr;
     QPlainTextEdit *identityDetails = nullptr;
     QTreeWidget *claimsTree = nullptr;
+
+    // Capabilities tab (derived verdicts)
+    QTreeWidget *capabilitiesTree = nullptr;
+    QPushButton *copyCapabilitiesBtn = nullptr;
 
     // Groups / Roles tab
     QLineEdit *groupsFilter = nullptr;
@@ -163,6 +169,14 @@ private:
     QString m_mgmtToken;
     bool m_isGuest = false;
     QSet<QString> m_activeRoleTemplateIds;  // for derived reset-capability
+    // authorizationPolicy defaults - tenant-wide "user role" permissions that
+    // apply to every non-admin user. Loaded once from
+    // /policies/authorizationPolicy; consulted by renderCapabilities().
+    bool m_authPolicyLoaded = false;
+    bool m_defaultAllowedToCreateApps = false;
+    bool m_defaultAllowedToCreateSecurityGroups = false;
+    bool m_defaultAllowedToReadOtherUsers = true;   // tenant default is `true`
+    bool m_defaultAllowedToCreateTenants = false;
     int m_pending = 0;
     int m_rbacRoleLookups = 0;
     // roleDefinitionId -> {name, type ("BuiltInRole"|"CustomRole")}

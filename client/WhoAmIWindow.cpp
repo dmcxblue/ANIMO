@@ -71,6 +71,8 @@ const QMap<QString, QString> &widToRole() {
         {"9360feb5-f418-4baa-8175-e2a00bac4301", "Directory Writers"},
         {"c430b396-e693-46cc-96f3-db01bf8bb62a", "Attack Payload Author"},
         {"9c094953-4995-41c8-84c8-3ebb9b32c93f", "Attack Simulation Administrator"},
+        {"14b83b21-be74-40e6-8c60-96017c67e8d0", "Application Developer"},
+        {"b1be1c3e-b65d-4f19-8427-f6fa0d97feb9", "Conditional Access Administrator"},
     };
     return m;
 }
@@ -199,6 +201,42 @@ void WhoAmIWindow::setupUi() {
     identitySplit->setSizes({220, 320});
     identityLayout->addWidget(identitySplit, 1);
     tabs->addTab(identityTab, "Identity + Claims");
+
+    // --- Capabilities tab --------------------------------------------------
+    // Distils the raw facts collected on the other tabs into red-team-actionable
+    // yes/no verdicts. Populated by renderCapabilities() from checkComplete().
+    auto *capsTab = new QWidget(this);
+    auto *capsLayout = new QVBoxLayout(capsTab);
+    capsLayout->addWidget(new QLabel(
+        "<b>Derived capability verdicts</b> - what this identity can actually do. "
+        "Every row cites the evidence from the other tabs.", capsTab));
+
+    capabilitiesTree = new QTreeWidget(capsTab);
+    capabilitiesTree->setHeaderLabels({"Capability", "Verdict", "Because..."});
+    capabilitiesTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    capabilitiesTree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    capabilitiesTree->header()->setStretchLastSection(true);
+    capabilitiesTree->setAlternatingRowColors(true);
+    capabilitiesTree->setRootIsDecorated(false);
+    makeCopyContextMenu(capabilitiesTree);
+    capsLayout->addWidget(capabilitiesTree, 1);
+
+    auto *capsBtnRow = new QHBoxLayout();
+    copyCapabilitiesBtn = new QPushButton("Copy Summary", capsTab);
+    connect(copyCapabilitiesBtn, &QPushButton::clicked, this, [this]() {
+        QString out;
+        for (int i = 0; i < capabilitiesTree->topLevelItemCount(); ++i) {
+            auto *it = capabilitiesTree->topLevelItem(i);
+            out += QString("%1  [%2]  %3\n").arg(it->text(0), it->text(1), it->text(2));
+        }
+        QApplication::clipboard()->setText(out);
+        logInfo("Capabilities summary copied to clipboard.");
+    });
+    capsBtnRow->addStretch();
+    capsBtnRow->addWidget(copyCapabilitiesBtn);
+    capsLayout->addLayout(capsBtnRow);
+
+    tabs->addTab(capsTab, "Capabilities");
 
     // --- Groups & Roles tab ------------------------------------------------
     auto *grTab = new QWidget(this);
@@ -731,6 +769,7 @@ void WhoAmIWindow::runWhoAmI() {
         loadIdentityAndClaims(graph);
         loadMemberOf(graph);
         loadDirectoryRoleAssignments(graph);
+        loadAuthorizationPolicy(graph);
         loadOwnedObjects(graph);
         loadOwnedDevices(graph);
         loadRegisteredDevices(graph);
@@ -981,6 +1020,41 @@ void WhoAmIWindow::loadDirectoryRoleAssignments(const QString &graphToken) {
             if (!tid.isEmpty()) m_activeRoleTemplateIds.insert(tid);
         }
         deriveResetCapability();
+        checkComplete();
+    });
+}
+
+void WhoAmIWindow::loadAuthorizationPolicy(const QString &graphToken) {
+    if (graphToken.isEmpty()) return;
+    m_pending++;
+    // Tenant-wide "user role" permissions - what every non-admin user can do
+    // by default (create apps, create security groups, invite guests, ...).
+    // Cheap single GET; 403 is fine (older tenants restrict this).
+    const QString url = QStringLiteral(
+        "https://graph.microsoft.com/v1.0/policies/authorizationPolicy");
+    QNetworkReply *reply = net->get(createBearerRequest(url, graphToken));
+    trackReply(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        untrackReply(reply); reply->deleteLater(); m_pending--;
+        if (!NetworkHelper::isReplySuccess(reply)) { checkComplete(); return; }
+
+        // v1.0 returns a single object; some tenants return {value:[{...}]}.
+        QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+        if (root.contains("value") && root.value("value").isArray()) {
+            const QJsonArray arr = root.value("value").toArray();
+            if (!arr.isEmpty()) root = arr.first().toObject();
+        }
+        const QJsonObject defaults =
+            root.value("defaultUserRolePermissions").toObject();
+        m_defaultAllowedToCreateApps =
+            defaults.value("allowedToCreateApps").toBool(false);
+        m_defaultAllowedToCreateSecurityGroups =
+            defaults.value("allowedToCreateSecurityGroups").toBool(false);
+        m_defaultAllowedToReadOtherUsers =
+            defaults.value("allowedToReadOtherUsers").toBool(true);
+        m_defaultAllowedToCreateTenants =
+            defaults.value("allowedToCreateTenants").toBool(false);
+        m_authPolicyLoaded = true;
         checkComplete();
     });
 }
@@ -1567,6 +1641,30 @@ void WhoAmIWindow::addRbacRow(const QString &sub, const QString &scope,
     rbacTable->setItem(row, 4, pItem);
 }
 
+namespace {
+
+// Well-known template IDs used only inside renderCapabilities/derive routines.
+// Duplicating a few constants is fine - they're immutable Microsoft GUIDs -
+// and keeps the mapping legible per-capability without a giant global table.
+const QString kGlobalAdmin           = QStringLiteral("62e90394-69f5-4237-9190-012177145e10");
+const QString kPrivRoleAdmin         = QStringLiteral("e8611ab8-c189-46e8-94e1-60213ab1f814");
+const QString kApplicationAdmin      = QStringLiteral("9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3");
+const QString kCloudAppAdmin         = QStringLiteral("158c047a-c907-4556-b7ef-446551a6b5f7");
+const QString kApplicationDeveloper  = QStringLiteral("14b83b21-be74-40e6-8c60-96017c67e8d0");
+const QString kAuthAdmin             = QStringLiteral("c4e39bd9-1100-46d3-8c65-fb160da0071f");
+const QString kPrivAuthAdmin         = QStringLiteral("7be44c8a-adaf-4e2a-84d6-ab2649e08a13");
+const QString kUserAdmin             = QStringLiteral("fe930be7-5e62-47db-91af-98c3a49a38b1");
+const QString kGroupsAdmin           = QStringLiteral("fdd7a751-b60b-444a-984c-02652fe8fa1c");
+const QString kSecurityAdmin         = QStringLiteral("194ae4cb-b126-40b2-bd5b-6091b380977d");
+const QString kConditionalAccessAdmin = QStringLiteral("b1be1c3e-b65d-4f19-8427-f6fa0d97feb9");
+
+// Colouring convention for verdict cells.
+const QColor kVerdictYes    = QColor("#8fce8f");   // green - full capability
+const QColor kVerdictPartial= QColor("#f0b060");   // amber - scope-limited
+const QColor kVerdictNo     = QColor("#a0a0a0");   // gray  - no capability
+
+} // namespace
+
 void WhoAmIWindow::deriveResetCapability() {
     QSet<QString> matches;
     for (const QString &tid : m_activeRoleTemplateIds) {
@@ -1593,6 +1691,277 @@ void WhoAmIWindow::deriveResetCapability() {
 }
 
 // ============================================================================
+// Derived Capabilities pane
+// ============================================================================
+
+void WhoAmIWindow::renderCapabilities() {
+    capabilitiesTree->clear();
+
+    // Small helper: does the current identity hold any of the given role tids?
+    auto holdsAny = [this](std::initializer_list<QString> tids) -> QStringList {
+        QStringList hit;
+        for (const QString &t : tids) {
+            if (m_activeRoleTemplateIds.contains(t))
+                hit << widToRole().value(t, t.left(8));
+        }
+        return hit;
+    };
+
+    // Small helper: does rbacTable contain a row whose role-name column matches
+    // any of `roleNames` (case-insensitive substring). Returns matching scopes.
+    auto rbacScopesFor = [this](std::initializer_list<QString> roleNames) -> QStringList {
+        QStringList scopes;
+        for (int r = 0; r < rbacTable->rowCount(); ++r) {
+            auto *roleItem  = rbacTable->item(r, 2);
+            auto *scopeItem = rbacTable->item(r, 1);
+            if (!roleItem || !scopeItem) continue;
+            const QString role = roleItem->text();
+            for (const QString &want : roleNames) {
+                if (role.compare(want, Qt::CaseInsensitive) == 0 ||
+                    role.contains(want, Qt::CaseInsensitive)) {
+                    scopes << QString("%1 @ %2").arg(role, scopeItem->text());
+                    break;
+                }
+            }
+        }
+        return scopes;
+    };
+
+    // Small helper: check if the Graph token has any of the delegated scopes.
+    auto tokenHasScope = [this](std::initializer_list<QString> scopes) -> QStringList {
+        QStringList hit;
+        for (int i = 0; i < scopesTree->topLevelItemCount(); ++i) {
+            const QString s = scopesTree->topLevelItem(i)->text(0);
+            for (const QString &want : scopes) {
+                if (s.compare(want, Qt::CaseInsensitive) == 0) hit << s;
+            }
+        }
+        return hit;
+    };
+
+    // Count owned Applications for the "add secrets" derivation.
+    int ownedApps = 0;
+    for (int i = 0; i < ownedTree->topLevelItemCount(); ++i) {
+        // ownedTree first column shows the display name; second column has the
+        // type. This UI structure predates any label constants, so match the
+        // exact word used in classifyMember(): "Application".
+        for (int j = 0; j < ownedTree->columnCount(); ++j) {
+            if (ownedTree->topLevelItem(i)->text(j) == QLatin1String("Application")) {
+                ++ownedApps; break;
+            }
+        }
+    }
+
+    // PIM-eligible Global Admin?
+    bool eligibleGA = false;
+    for (int i = 0; i < rolesEligibleTree->topLevelItemCount(); ++i) {
+        if (rolesEligibleTree->topLevelItem(i)->text(0).contains("Global Administrator",
+                                                                  Qt::CaseInsensitive)) {
+            eligibleGA = true; break;
+        }
+    }
+
+    // Row-emit helper. Note: named `addRow` (not `emit`) because `emit` is a
+    // Qt keyword and identifiers named `emit` don't parse when Qt keywords are
+    // enabled (default).
+    auto addRow = [this](const QString &cap, const QString &verdict,
+                         const QColor &color, const QString &because) {
+        auto *it = new QTreeWidgetItem(capabilitiesTree);
+        it->setText(0, cap);
+        it->setText(1, verdict);
+        it->setText(2, because);
+        it->setForeground(1, QBrush(color));
+    };
+
+    // --- Directory / Identity ------------------------------------------------
+
+    // Register applications
+    {
+        const QStringList roles = holdsAny({kGlobalAdmin, kApplicationAdmin,
+                                            kCloudAppAdmin, kApplicationDeveloper});
+        if (!roles.isEmpty())
+            addRow("Register applications", "YES", kVerdictYes,
+                 QString("directory role: %1").arg(roles.join(", ")));
+        else if (m_authPolicyLoaded && m_defaultAllowedToCreateApps)
+            addRow("Register applications", "YES", kVerdictYes,
+                 "tenant authorizationPolicy: defaultUserRolePermissions.allowedToCreateApps=true");
+        else if (!m_authPolicyLoaded)
+            addRow("Register applications", "unknown", kVerdictPartial,
+                 "authorizationPolicy not readable with this token; needs role check "
+                 "or Policy.Read.All to be sure");
+        else
+            addRow("Register applications", "no", kVerdictNo,
+                 "no admin role AND tenant default disallows creating apps");
+    }
+
+    // Create security groups
+    {
+        const QStringList roles = holdsAny({kGlobalAdmin, kGroupsAdmin, kUserAdmin});
+        if (!roles.isEmpty())
+            addRow("Create security groups", "YES", kVerdictYes,
+                 QString("directory role: %1").arg(roles.join(", ")));
+        else if (m_authPolicyLoaded && m_defaultAllowedToCreateSecurityGroups)
+            addRow("Create security groups", "YES", kVerdictYes,
+                 "tenant authorizationPolicy: allowedToCreateSecurityGroups=true");
+        else
+            addRow("Create security groups", "no", kVerdictNo,
+                 "no admin role AND tenant default disallows");
+    }
+
+    // Grant admin consent to apps
+    {
+        const QStringList roles = holdsAny({kGlobalAdmin, kPrivRoleAdmin,
+                                            kApplicationAdmin, kCloudAppAdmin});
+        const QStringList scopes = tokenHasScope({"Directory.AccessAsUser.All"});
+        if (!roles.isEmpty() || !scopes.isEmpty()) {
+            QStringList reasons;
+            if (!roles.isEmpty())  reasons << QString("directory role: %1").arg(roles.join(", "));
+            if (!scopes.isEmpty()) reasons << QString("token scope: %1").arg(scopes.join(", "));
+            addRow("Grant admin consent to apps", "YES", kVerdictYes,
+                 reasons.join("; "));
+        } else {
+            addRow("Grant admin consent to apps", "no", kVerdictNo,
+                 "no matching directory role and no Directory.AccessAsUser.All in delegated scopes");
+        }
+    }
+
+    // Reset other users' passwords (surfaces the deriveResetCapability finding
+    // in the capabilities pane too, so operators don't have to switch tabs).
+    {
+        QStringList matched;
+        for (const QString &tid : m_activeRoleTemplateIds)
+            if (passwordResetRoleTemplates().contains(tid))
+                matched << widToRole().value(tid, tid.left(8));
+        if (!matched.isEmpty()) {
+            const bool everyone = m_activeRoleTemplateIds.contains(kGlobalAdmin) ||
+                                  m_activeRoleTemplateIds.contains(kPrivAuthAdmin) ||
+                                  m_activeRoleTemplateIds.contains(kPrivRoleAdmin);
+            addRow("Reset other users' passwords",
+                 everyone ? "YES (any incl. admins)" : "YES (limited scope)",
+                 everyone ? kVerdictYes : kVerdictPartial,
+                 QString("directory role: %1").arg(matched.join(", ")));
+        } else {
+            addRow("Reset other users' passwords", "no", kVerdictNo,
+                 "no Auth/User/Password/Helpdesk/Priv-Auth Admin role");
+        }
+    }
+
+    // Add authentication methods to other users (TAP mint, backdoor phone, ...)
+    {
+        const QStringList roles = holdsAny({kGlobalAdmin, kAuthAdmin, kPrivAuthAdmin});
+        const QStringList scopes = tokenHasScope({"UserAuthenticationMethod.ReadWrite.All"});
+        if (!roles.isEmpty() || !scopes.isEmpty()) {
+            QStringList reasons;
+            if (!roles.isEmpty())  reasons << QString("directory role: %1").arg(roles.join(", "));
+            if (!scopes.isEmpty()) reasons << QString("token scope: %1").arg(scopes.join(", "));
+            addRow("Add auth methods to other users (TAP/phone/OATH)",
+                 "YES", kVerdictYes, reasons.join("; "));
+        } else {
+            addRow("Add auth methods to other users (TAP/phone/OATH)", "no", kVerdictNo,
+                 "no Auth/PrivAuth/Global Admin role and no UserAuthenticationMethod.ReadWrite.All scope");
+        }
+    }
+
+    // Modify Conditional Access policies
+    {
+        const QStringList roles = holdsAny({kGlobalAdmin, kSecurityAdmin, kConditionalAccessAdmin});
+        if (!roles.isEmpty())
+            addRow("Modify Conditional Access policies", "YES", kVerdictYes,
+                 QString("directory role: %1").arg(roles.join(", ")));
+        else
+            addRow("Modify Conditional Access policies", "no", kVerdictNo,
+                 "no Global / Security / Conditional Access Admin role");
+    }
+
+    // Add secrets or certs to owned applications
+    {
+        if (ownedApps > 0)
+            addRow("Add secrets/certs to owned apps", "YES", kVerdictYes,
+                 QString("own %1 application(s) - see Owned tab").arg(ownedApps));
+        else
+            addRow("Add secrets/certs to owned apps", "no", kVerdictNo,
+                 "no owned Application objects in this identity's ownership");
+    }
+
+    // Elevate to Global Admin (immediate vs PIM activation)
+    {
+        if (m_activeRoleTemplateIds.contains(kGlobalAdmin))
+            addRow("Elevate to Global Admin", "YES (already)", kVerdictYes,
+                 "active directory role assignment");
+        else if (eligibleGA)
+            addRow("Elevate to Global Admin", "YES via PIM", kVerdictPartial,
+                 "PIM eligible - see Groups && Roles > PIM Eligible Roles");
+        else
+            addRow("Elevate to Global Admin", "no", kVerdictNo,
+                 "not active, not PIM-eligible for Global Administrator");
+    }
+
+    // --- Azure resource ------------------------------------------------------
+
+    // Run commands on VMs
+    {
+        const QStringList scopes = rbacScopesFor({"Owner", "Contributor",
+                                                   "Virtual Machine Contributor"});
+        if (!scopes.isEmpty())
+            addRow("Run commands on VMs", "YES", kVerdictYes,
+                 QString("%1 scope(s): %2")
+                     .arg(scopes.size()).arg(scopes.join(" | ")));
+        else
+            addRow("Run commands on VMs", "no", kVerdictNo,
+                 "no Owner / Contributor / VM Contributor at any accessible scope");
+    }
+
+    // Modify Azure RBAC (grant new role assignments)
+    {
+        const QStringList scopes = rbacScopesFor({"Owner", "User Access Administrator",
+                                                   "Role Based Access Control Administrator"});
+        if (!scopes.isEmpty())
+            addRow("Modify Azure RBAC (grant roles)", "YES", kVerdictYes,
+                 QString("%1 scope(s): %2")
+                     .arg(scopes.size()).arg(scopes.join(" | ")));
+        else
+            addRow("Modify Azure RBAC (grant roles)", "no", kVerdictNo,
+                 "no Owner / User Access Administrator / RBAC Administrator");
+    }
+
+    // Read Key Vault secrets (data plane, RBAC model)
+    {
+        const QStringList scopes = rbacScopesFor({
+            "Key Vault Administrator", "Key Vault Secrets Officer",
+            "Key Vault Secrets User", "Key Vault Reader" });
+        if (!scopes.isEmpty())
+            addRow("Read Key Vault secrets (RBAC model)", "YES", kVerdictYes,
+                 QString("%1 scope(s): %2")
+                     .arg(scopes.size()).arg(scopes.join(" | ")));
+        else
+            addRow("Read Key Vault secrets (RBAC model)", "unknown", kVerdictPartial,
+                 "no matching Azure RBAC role; access-policy-model vaults are NOT "
+                 "reflected here - check Key Vault Explorer to be sure");
+    }
+
+    // Read storage account data
+    {
+        const QStringList scopes = rbacScopesFor({
+            "Storage Blob Data Owner", "Storage Blob Data Contributor",
+            "Storage Blob Data Reader", "Storage Account Contributor",
+            "Storage File Data" });
+        if (!scopes.isEmpty())
+            addRow("Read Storage account data", "YES", kVerdictYes,
+                 QString("%1 scope(s): %2")
+                     .arg(scopes.size()).arg(scopes.join(" | ")));
+        else
+            addRow("Read Storage account data", "no", kVerdictNo,
+                 "no Storage-Blob-Data / Storage-Account-Contributor role");
+    }
+
+    // Managed Identity access from VMs - not derivable from Entra; pointer
+    // note only.
+    addRow("Steal Managed Identity token", "runtime check", kVerdictPartial,
+         "not derivable from directory data - use VM Manager > Run Command "
+         "or Remote Exec > Grab MI Token from IMDS on any accessible VM");
+}
+
+// ============================================================================
 // Complete + export/copy
 // ============================================================================
 
@@ -1605,6 +1974,9 @@ void WhoAmIWindow::checkComplete() {
         rbacSummary->setText(QString("<b>%1</b> role assignment(s) across the accessible subscriptions.")
                                  .arg(rbacRows));
     }
+    // Distil the raw data collected across all panes into the derived
+    // capability verdicts shown on the Capabilities tab.
+    renderCapabilities();
     logSuccess("WhoAmI complete.");
 }
 
