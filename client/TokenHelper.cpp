@@ -1,7 +1,9 @@
 #include "TokenHelper.h"
 #include "TokenStore.h"
 #include "NetworkHelper.h"
+#include "PsSessionRunner.h"
 #include "SpnCredentialStore.h"
+#include <QCoreApplication>
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QUrlQuery>
@@ -306,10 +308,49 @@ void TokenHelper::getTokenForResourceBySession(const QString &resource, TokenCal
         return;
     }
 
-    callback(false, QString(),
-             QString("No refresh token and no stored SPN credentials for the selected session (%1). "
-                     "Log the same SPN in again with resource = %2 to obtain a token, or use a "
-                     "session that has a refresh token.").arg(sessionId.left(8), resource));
+    // Tier 4: Session-scoped mint via the running pwsh. Both Az PS and az cli
+    // are logged in at session-start (see login_*.ps1); asking them for a
+    // token for the requested resource is the cheapest way to satisfy
+    // "give me a token for X" when no refresh token / SPN secret is on hand.
+    // The one-liner tries Az PS first, then falls back to az cli.
+    QString escResource = resource;
+    escResource.replace('\'', QStringLiteral("''"));
+    const QString script = QStringLiteral(
+        "$r='%1';"
+        "$t=$null;"
+        "try{ $t=(Get-AzAccessToken -ResourceUrl $r -EA Stop).Token }catch{};"
+        "if(-not $t){"
+          "try{"
+            "$t=(& az account get-access-token --resource $r -o tsv --query accessToken 2>$null);"
+            "if($LASTEXITCODE -ne 0){$t=$null}"
+          "}catch{}"
+        "};"
+        "if($t){ '{\"token\":\"'+$t+'\"}' }else{ '{}' }"
+    ).arg(escResource);
+
+    m_pendingRequests[requestKey].append(callback);
+    PsSessionRunner::run(this, sessionId, script,
+        [this, requestKey, sessionId, resource](bool ok, const QJsonValue &json, const QString &raw) {
+        const QList<TokenCallback> callbacks = m_pendingRequests.take(requestKey);
+        QString token;
+        if (ok && json.isObject()) token = json.toObject().value("token").toString();
+        if (!token.isEmpty()) {
+            // Cache under this session so the next lookup hits Tier 1.
+            TokenInfo info;
+            info.accessToken = token;
+            info.resource    = resource;
+            info.sessionId   = sessionId;
+            TokenStore::instance()->storeToken(sessionId, info);
+            for (const auto &cb : callbacks) cb(true, token, QString());
+        } else {
+            const QString err = QString(
+                "No refresh token, no stored SPN credentials, and the session's own pwsh "
+                "could not mint a token for %1 (via Get-AzAccessToken or az cli). "
+                "Log the same identity in again with resource = %1 to obtain a token. "
+                "Raw pwsh reply: %2").arg(resource, raw.left(240));
+            for (const auto &cb : callbacks) cb(false, QString(), err);
+        }
+    }, /*wrap=*/false);
 }
 
 void TokenHelper::getTokensForResourcesBySession(const QStringList &resources, MultiTokenCallback callback,
