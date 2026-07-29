@@ -18,9 +18,7 @@
 #include "ReportDialog.h"
 #include "ActivityWindow.h"
 #include "StyleManager.h"
-#include "MagicAppFinderWindow.h"
 #include "RefreshTokenSprayWindow.h"
-#include "GatherAllWindow.h"
 
 #include "../shared/SessionPersistence.h"
 #include "../shared/Protocol.h"
@@ -215,9 +213,7 @@ void DashboardWindow::initUI()
 
     // === Discovery menu ===
     QAction *actionWhoAmI            = discoveryMenu->addAction("WhoAmI (Entra / Azure)");
-    QAction *actionGatherAll         = discoveryMenu->addAction("Gather All (Bulk Enum)");
     QAction *actionTenantSearch      = discoveryMenu->addAction("Tenant Search (Files / Mail / Chat)");
-    QAction *actionMagicAppFinder    = discoveryMenu->addAction("Magic App Finder");
     discoveryMenu->addSeparator();
     QAction *actionAzureEnum         = discoveryMenu->addAction("Subscriptions && Resources");
     QAction *actionConditionalAccess = discoveryMenu->addAction("Conditional Access Policies");
@@ -237,9 +233,7 @@ void DashboardWindow::initUI()
     QAction *actionLogicApps         = discoveryMenu->addAction("Logic Apps");
 
     connect(actionWhoAmI,            &QAction::triggered, this, &DashboardWindow::openWhoAmIWindow);
-    connect(actionGatherAll,         &QAction::triggered, this, &DashboardWindow::openGatherAllWindow);
     connect(actionTenantSearch,      &QAction::triggered, this, &DashboardWindow::openTenantSearchWindow);
-    connect(actionMagicAppFinder,    &QAction::triggered, this, &DashboardWindow::openMagicAppFinder);
     connect(actionAzureEnum,         &QAction::triggered, this, &DashboardWindow::openAzureEnumWindow);
     connect(actionConditionalAccess, &QAction::triggered, this, &DashboardWindow::openConditionalAccessWindow);
     connect(actionCrossTenant,       &QAction::triggered, this, &DashboardWindow::openCrossTenantAccessWindow);
@@ -917,17 +911,6 @@ void DashboardWindow::openRefreshTokenSpray() {
     win->show();
 }
 
-void DashboardWindow::openMagicAppFinder() {
-    auto *win = new MagicAppFinderWindow(nullptr);
-    WindowHelper::setupWindow(win, this, 900, 700, 700, 500);
-    win->show();
-}
-
-void DashboardWindow::openGatherAllWindow() {
-    auto *win = new GatherAllWindow(nullptr);
-    WindowHelper::setupWindow(win, this, 800, 700, 700, 500);
-    win->show();
-}
 
 void DashboardWindow::openGraphQueries() {
     auto *win = WindowFactory::createGraphQueryWindow();

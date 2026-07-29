@@ -125,8 +125,6 @@ public slots:
     void openAttackAppSecret();
     void openSPNSpray();
     void openRefreshTokenSpray();
-    void openMagicAppFinder();
-    void openGatherAllWindow();
     void openTokenLogWindow();
     void openActivityWindow();
     void openTokenAnalysisWindow();
