@@ -5,6 +5,7 @@
 #include "TokenHelper.h"
 #include "TokenStore.h"
 #include "UserSelectorWidget.h"
+#include "WhoAmiInsights.h"
 #include "WindowFactory.h"
 #include "WindowHelper.h"
 
@@ -2278,6 +2279,63 @@ void WhoAmIWindow::checkComplete() {
     // Distil the raw data collected across all panes into the derived
     // capability verdicts shown on the Capabilities tab.
     renderCapabilities();
+
+    // Publish a typed snapshot so Post-Exploitation modules can autofill
+    // their input fields from what WhoAmI just discovered. Subscribers
+    // connect to WhoAmiInsights::insightsUpdated() in their ctor.
+    {
+        WhoAmiInsights::Snapshot snap;
+        snap.sessionId = userSelector ? userSelector->selectedSession() : QString();
+        snap.userOid              = m_userOid;
+        snap.userUpn              = m_userUpn;
+        snap.userTid              = m_userTid;
+        snap.isGuest              = m_isGuest;
+        snap.activeRoleTemplateIds= m_activeRoleTemplateIds;
+        snap.allControlActions    = m_allControlActions;
+        snap.allDataActions       = m_allDataActions;
+        snap.hasMgmtToken         = !m_mgmtToken.isEmpty();
+        snap.capturedAt           = QDateTime::currentDateTimeUtc();
+
+        // Best-effort tenant default domain: prefer the UPN suffix
+        // (@contoso.onmicrosoft.com), fall back to whatever the tenant
+        // header text has after the last space. Falls back to userTid GUID
+        // when neither works.
+        if (m_userUpn.contains('@'))
+            snap.tenantDefaultDomain = m_userUpn.section('@', -1);
+        if (snap.tenantDefaultDomain.isEmpty() && tenantHeader) {
+            const QString txt = tenantHeader->text();
+            const int lastSpace = txt.lastIndexOf(' ');
+            if (lastSpace >= 0) snap.tenantDefaultDomain = txt.mid(lastSpace + 1);
+        }
+
+        // RBAC scopes: walk rbacTable rows into typed RbacScope entries.
+        // Column layout (per addRbacRow): 0=subscription, 1=scope, 2=role,
+        // 3=roleType, 4=principalType.
+        for (int r = 0; r < rbacTable->rowCount(); ++r) {
+            WhoAmiInsights::RbacScope rs;
+            if (auto *it = rbacTable->item(r, 0)) rs.subscriptionId = it->text();
+            if (auto *it = rbacTable->item(r, 1)) rs.scope          = it->text();
+            if (auto *it = rbacTable->item(r, 2)) rs.roleName       = it->text();
+            if (auto *it = rbacTable->item(r, 3)) rs.roleType       = it->text();
+            snap.rbacScopes.append(rs);
+        }
+
+        // Owned apps: walk ownedTree top-level items whose column 0 is
+        // "Application". Per classifyMember() the label is exactly "Application".
+        for (int i = 0; i < ownedTree->topLevelItemCount(); ++i) {
+            auto *it = ownedTree->topLevelItem(i);
+            if (!it) continue;
+            if (it->text(0) != QLatin1String("Application")) continue;
+            WhoAmiInsights::OwnedApp app;
+            app.displayName = it->text(1);
+            app.appId       = it->text(2);   // classifyMember stores appId here
+            app.objectId    = it->text(3);
+            snap.ownedApps.append(app);
+        }
+
+        WhoAmiInsights::instance()->publish(snap);
+    }
+
     logSuccess("WhoAmI complete.");
 }
 
