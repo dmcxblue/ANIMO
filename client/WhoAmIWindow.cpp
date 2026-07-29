@@ -1,11 +1,14 @@
 #include "WhoAmIWindow.h"
 #include "NetworkHelper.h"
+#include "PsSessionRunner.h"
 #include "StyleManager.h"
 #include "TokenHelper.h"
 #include "TokenStore.h"
 #include "UserSelectorWidget.h"
 #include "WindowFactory.h"
 #include "WindowHelper.h"
+
+#include <QSplitter>
 
 #include <QAction>
 #include <QApplication>
@@ -211,6 +214,8 @@ void WhoAmIWindow::setupUi() {
         "<b>Derived capability verdicts</b> - what this identity can actually do. "
         "Every row cites the evidence from the other tabs.", capsTab));
 
+    auto *capsSplit = new QSplitter(Qt::Vertical, capsTab);
+
     capabilitiesTree = new QTreeWidget(capsTab);
     capabilitiesTree->setHeaderLabels({"Capability", "Verdict", "Because..."});
     capabilitiesTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
@@ -219,7 +224,24 @@ void WhoAmIWindow::setupUi() {
     capabilitiesTree->setAlternatingRowColors(true);
     capabilitiesTree->setRootIsDecorated(false);
     makeCopyContextMenu(capabilitiesTree);
-    capsLayout->addWidget(capabilitiesTree, 1);
+    capsSplit->addWidget(capabilitiesTree);
+
+    // Fine-grained ARM actions - populated from `az role assignment list` +
+    // `az role definition list` inside the session pwsh. Surfaces things like
+    // Microsoft.Authorization/roleAssignments/write that a custom role could
+    // expose without matching any built-in role name our derivation knows about.
+    actionsTree = new QTreeWidget(capsTab);
+    actionsTree->setHeaderLabels({"Scope / Role / Action", "Kind", "Notes"});
+    actionsTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    actionsTree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    actionsTree->header()->setStretchLastSection(true);
+    actionsTree->setAlternatingRowColors(true);
+    makeCopyContextMenu(actionsTree);
+    capsSplit->addWidget(actionsTree);
+
+    capsSplit->setStretchFactor(0, 3);
+    capsSplit->setStretchFactor(1, 2);
+    capsLayout->addWidget(capsSplit, 1);
 
     auto *capsBtnRow = new QHBoxLayout();
     copyCapabilitiesBtn = new QPushButton("Copy Summary", capsTab);
@@ -792,6 +814,12 @@ void WhoAmIWindow::runWhoAmI() {
             rbacSummary->setText("<i>Graph token lacks 'oid' claim - RBAC lookup skipped.</i>");
         }
 
+        // Fine-grained action enumeration runs in the session's own pwsh
+        // (az cli first, Az PS fallback) and doesn't need any HTTP token
+        // from us - the session context that Connect-AzAccount / `az login`
+        // set up at login time already has what it needs.
+        if (!m_userOid.isEmpty()) loadRbacActions();
+
         checkComplete();
     });
 }
@@ -1057,6 +1085,111 @@ void WhoAmIWindow::loadAuthorizationPolicy(const QString &graphToken) {
         m_authPolicyLoaded = true;
         checkComplete();
     });
+}
+
+void WhoAmIWindow::loadRbacActions() {
+    // Runs inside the session's pwsh (which is authenticated for both Az PS
+    // and az cli after Slice 6/7). Tries az cli first because it enumerates
+    // faster and often has broader read scope; falls back to
+    // Get-AzRoleAssignment + Get-AzRoleDefinition.
+    //
+    // Returns: an array of {scope, roleName, actions[], notActions[],
+    // dataActions[], notDataActions[], source}. If neither toolchain returns
+    // anything the callback just runs with an empty array.
+    if (!userSelector) return;
+    const QString sid = userSelector->selectedSession();
+    if (sid.isEmpty()) return;
+    if (m_userOid.isEmpty()) return;
+
+    // Escape the OID for embedding in single-quoted PS string.
+    QString escOid = m_userOid;
+    escOid.replace('\'', QStringLiteral("''"));
+
+    // The wrapper (PsSessionRunner default) will apply `@(...)|ConvertTo-Json`,
+    // so this script just needs to leave an array-of-objects at the pipeline
+    // tail.
+    const QString script = QString(
+        "$oid='%1';"
+        "$rows=@();"
+        "try{"
+          "$j=& az role assignment list --all --assignee $oid -o json 2>$null;"
+          "if($LASTEXITCODE -eq 0 -and $j){"
+            "$defs=@{};"
+            "foreach($a in ($j|ConvertFrom-Json)){"
+              "$rn=$a.roleDefinitionName;"
+              "if(-not $defs.ContainsKey($rn)){"
+                "$d=& az role definition list --name $rn -o json 2>$null;"
+                "if($LASTEXITCODE -eq 0 -and $d){$defs[$rn]=($d|ConvertFrom-Json|Select-Object -First 1).permissions}"
+              "}"
+              "$perms=$defs[$rn];"
+              "$rows+=[pscustomobject]@{"
+                "scope=$a.scope;"
+                "roleName=$rn;"
+                "actions=@($perms|ForEach-Object{$_.actions}|Where-Object{$_}|Sort-Object -Unique);"
+                "dataActions=@($perms|ForEach-Object{$_.dataActions}|Where-Object{$_}|Sort-Object -Unique);"
+                "notActions=@($perms|ForEach-Object{$_.notActions}|Where-Object{$_}|Sort-Object -Unique);"
+                "notDataActions=@($perms|ForEach-Object{$_.notDataActions}|Where-Object{$_}|Sort-Object -Unique);"
+                "source='azcli'"
+              "}"
+            "}"
+          "}"
+        "}catch{}"
+        "if($rows.Count -eq 0){"
+          "try{"
+            "$assignments=Get-AzRoleAssignment -ObjectId $oid -EA Stop;"
+            "$defMap=@{};"
+            "foreach($a in $assignments){"
+              "if(-not $defMap.ContainsKey($a.RoleDefinitionId)){"
+                "$defMap[$a.RoleDefinitionId]=Get-AzRoleDefinition -Id $a.RoleDefinitionId"
+              "}"
+              "$d=$defMap[$a.RoleDefinitionId];"
+              "$rows+=[pscustomobject]@{"
+                "scope=$a.Scope;"
+                "roleName=$a.RoleDefinitionName;"
+                "actions=@($d.Actions);"
+                "dataActions=@($d.DataActions);"
+                "notActions=@($d.NotActions);"
+                "notDataActions=@($d.NotDataActions);"
+                "source='azps'"
+              "}"
+            "}"
+          "}catch{}"
+        "}"
+        "$rows"
+    ).arg(escOid);
+
+    m_pending++;
+    PsSessionRunner::run(this, sid, script,
+        [this](bool ok, const QJsonValue &json, const QString &raw) {
+            m_pending--;
+            m_actionsLoaded = true;
+            if (!ok || !json.isArray()) {
+                if (!ok) logWarning(QString("Fine-grained RBAC action lookup failed: %1")
+                                        .arg(raw.left(200)));
+                checkComplete();
+                return;
+            }
+            const QJsonArray arr = json.toArray();
+            for (const QJsonValue &v : arr) {
+                if (!v.isObject()) continue;
+                const QJsonObject o = v.toObject();
+                m_rbacActionRows.append(o);
+                if (m_actionsSource.isEmpty()) m_actionsSource = o.value("source").toString();
+                for (const QJsonValue &a : o.value("actions").toArray())
+                    m_allControlActions.insert(a.toString());
+                for (const QJsonValue &a : o.value("dataActions").toArray())
+                    m_allDataActions.insert(a.toString());
+            }
+            if (!arr.isEmpty()) {
+                logSuccess(QString("Fine-grained RBAC actions: %1 role assignment(s), "
+                                   "%2 unique control actions, %3 data actions  [%4]")
+                                .arg(arr.size())
+                                .arg(m_allControlActions.size())
+                                .arg(m_allDataActions.size())
+                                .arg(m_actionsSource));
+            }
+            checkComplete();
+        }, /*wrap=*/true, /*depth=*/6);
 }
 
 void WhoAmIWindow::loadPimEligibility(const QString &graphToken) {
@@ -1959,6 +2092,174 @@ void WhoAmIWindow::renderCapabilities() {
     addRow("Steal Managed Identity token", "runtime check", kVerdictPartial,
          "not derivable from directory data - use VM Manager > Run Command "
          "or Remote Exec > Grab MI Token from IMDS on any accessible VM");
+
+    // -------------------------------------------------------------------
+    // Fine-grained action derivations. These read the actual actions[] /
+    // dataActions[] from every assigned role definition, not just the role
+    // NAME - which catches custom roles that grant e.g.
+    // Microsoft.Authorization/roleAssignments/write without being named
+    // Owner / User Access Administrator.
+    // -------------------------------------------------------------------
+
+    // Helper: does the identity have any action matching `patterns`? Patterns
+    // may end with `*` for wildcard prefix match; a bare `*` matches
+    // everything. Returns matching actions.
+    auto matchActions = [](const QSet<QString> &pool,
+                           std::initializer_list<QString> patterns) -> QStringList {
+        QStringList hits;
+        for (const QString &act : pool) {
+            for (const QString &p : patterns) {
+                if (p == QLatin1String("*")) { hits << act; break; }
+                if (p.endsWith('*')) {
+                    if (act.startsWith(p.left(p.size() - 1), Qt::CaseInsensitive)) {
+                        hits << act; break;
+                    }
+                } else if (act.compare(p, Qt::CaseInsensitive) == 0) {
+                    hits << act; break;
+                }
+            }
+        }
+        return hits;
+    };
+
+    if (!m_actionsLoaded) {
+        addRow("Fine-grained RBAC actions", "loading...", kVerdictPartial,
+               "az cli / Az PS enumeration still in flight (or session pwsh not ready)");
+    } else if (m_rbacActionRows.isEmpty()) {
+        addRow("Fine-grained RBAC actions", "none", kVerdictNo,
+               "no ARM role assignments returned by `az role assignment list` OR "
+               "Get-AzRoleAssignment for this OID (may indicate no ARM access at all "
+               "or missing Microsoft.Authorization/*/read permission)");
+    } else {
+        addRow(QString("Fine-grained RBAC actions [%1]").arg(m_actionsSource),
+               QString("%1 unique").arg(m_allControlActions.size()),
+               kVerdictYes,
+               QString("%1 role assignment(s) enumerated; see Actions tree below")
+                   .arg(m_rbacActionRows.size()));
+
+        // Grant new RBAC role assignments (catches custom roles that map
+        // Microsoft.Authorization/roleAssignments/write - not just Owner/UAA).
+        const QStringList hitsAssign = matchActions(m_allControlActions,
+            { "Microsoft.Authorization/roleAssignments/write",
+              "Microsoft.Authorization/*",
+              "*" });
+        if (!hitsAssign.isEmpty())
+            addRow("Grant RBAC role assignments (from actions)", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsAssign.first()));
+
+        // List storage keys / mint SAS.
+        const QStringList hitsKeys = matchActions(m_allControlActions,
+            { "Microsoft.Storage/storageAccounts/listKeys/action",
+              "Microsoft.Storage/storageAccounts/listAccountSas/action",
+              "Microsoft.Storage/storageAccounts/listServiceSas/action",
+              "Microsoft.Storage/*", "*" });
+        if (!hitsKeys.isEmpty())
+            addRow("List Storage account keys / mint SAS", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsKeys.first()));
+
+        // Key Vault secrets - RBAC model uses dataActions.
+        const QStringList hitsKvSecrets = matchActions(m_allDataActions,
+            { "Microsoft.KeyVault/vaults/secrets/getSecret/action",
+              "Microsoft.KeyVault/vaults/secrets/*",
+              "Microsoft.KeyVault/vaults/*", "*" });
+        if (!hitsKvSecrets.isEmpty())
+            addRow("Get Key Vault secrets (data plane)", "YES", kVerdictYes,
+                   QString("dataAction: %1").arg(hitsKvSecrets.first()));
+
+        // Deploy ARM templates - runs arbitrary resources.
+        const QStringList hitsDeploy = matchActions(m_allControlActions,
+            { "Microsoft.Resources/deployments/write",
+              "Microsoft.Resources/*", "*" });
+        if (!hitsDeploy.isEmpty())
+            addRow("Deploy ARM templates", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsDeploy.first()));
+
+        // Publish to App Service (RCE via WebDeploy / Kudu).
+        const QStringList hitsWeb = matchActions(m_allControlActions,
+            { "Microsoft.Web/sites/publish/action",
+              "Microsoft.Web/sites/write",
+              "Microsoft.Web/*", "*" });
+        if (!hitsWeb.isEmpty())
+            addRow("Publish to App Service (RCE via Kudu)", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsWeb.first()));
+
+        // Function Apps master-key retrieval.
+        const QStringList hitsFn = matchActions(m_allControlActions,
+            { "Microsoft.Web/sites/host/listkeys/action",
+              "Microsoft.Web/sites/functions/listkeys/action" });
+        if (!hitsFn.isEmpty())
+            addRow("Retrieve Function App master keys", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsFn.first()));
+
+        // Automation Account run-as / hybrid worker code execution.
+        const QStringList hitsAuto = matchActions(m_allControlActions,
+            { "Microsoft.Automation/automationAccounts/runbooks/write",
+              "Microsoft.Automation/automationAccounts/jobs/write",
+              "Microsoft.Automation/*" });
+        if (!hitsAuto.isEmpty())
+            addRow("Automation Account job / runbook write (RCE)", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsAuto.first()));
+
+        // Assign a Managed Identity to a resource (privilege elevation via MI).
+        const QStringList hitsMi = matchActions(m_allControlActions,
+            { "Microsoft.ManagedIdentity/userAssignedIdentities/assign/action",
+              "Microsoft.ManagedIdentity/*" });
+        if (!hitsMi.isEmpty())
+            addRow("Assign Managed Identity to resources", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsMi.first()));
+
+        // Elevate to root management group.
+        const QStringList hitsMg = matchActions(m_allControlActions,
+            { "Microsoft.Management/managementGroups/write",
+              "Microsoft.Management/*" });
+        if (!hitsMg.isEmpty())
+            addRow("Modify management-group hierarchy", "YES", kVerdictYes,
+                   QString("action: %1").arg(hitsMg.first()));
+    }
+
+    // -------------------------------------------------------------------
+    // Populate the fine-grained actions tree (scope -> role -> actions).
+    // -------------------------------------------------------------------
+    actionsTree->clear();
+
+    // Interesting-action highlight: substrings that make an action red so
+    // operators can spot high-value entries in a wall of read/list actions.
+    static const QStringList kInterestingSubstrings = {
+        "/write", "/delete", "/action",
+        "roleAssignments", "listKeys", "listAccountSas", "listServiceSas",
+        "getSecret", "getKey", "publish", "restart", "runCommand",
+        "userAssignedIdentities/assign", "managementGroups", "deployments/write",
+        "runbooks", "listkeys"
+    };
+    auto looksInteresting = [](const QString &action) -> bool {
+        for (const QString &s : kInterestingSubstrings)
+            if (action.contains(s, Qt::CaseInsensitive)) return true;
+        return false;
+    };
+
+    for (const QJsonObject &row : m_rbacActionRows) {
+        const QString scope    = row.value("scope").toString();
+        const QString roleName = row.value("roleName").toString();
+        auto *parent = new QTreeWidgetItem(actionsTree);
+        parent->setText(0, QString("%1  @  %2").arg(roleName, scope));
+        parent->setText(1, "role assignment");
+        parent->setForeground(0, QBrush(QColor("#8fd48f")));
+
+        auto addActionChild = [&](const QString &act, const QString &kind) {
+            auto *c = new QTreeWidgetItem(parent);
+            c->setText(0, act);
+            c->setText(1, kind);
+            if (looksInteresting(act)) {
+                c->setForeground(0, QBrush(QColor("#ff9060")));
+                c->setText(2, "high-value");
+            }
+        };
+        for (const QJsonValue &a : row.value("actions").toArray())        addActionChild(a.toString(), "action");
+        for (const QJsonValue &a : row.value("dataActions").toArray())    addActionChild(a.toString(), "dataAction");
+        for (const QJsonValue &a : row.value("notActions").toArray())     addActionChild(a.toString(), "notAction (excluded)");
+        for (const QJsonValue &a : row.value("notDataActions").toArray()) addActionChild(a.toString(), "notDataAction (excluded)");
+    }
+    actionsTree->collapseAll();
 }
 
 // ============================================================================

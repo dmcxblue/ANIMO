@@ -87,6 +87,14 @@ private:
                                QTreeWidgetItem *anchor);
     void loadDirectoryRoleAssignments(const QString &graphToken);
     void loadAuthorizationPolicy(const QString &graphToken);
+    // Enumerates the identity's ARM RBAC role assignments AND the raw action
+    // list of each assigned role definition, so the Capabilities pane can
+    // reason about specific actions like `Microsoft.Authorization/roleAssignments/write`
+    // (which a custom role could expose without matching any built-in role
+    // name we recognise). Runs `az role assignment list` + `az role definition
+    // list` inside the session pwsh; falls back to Get-AzRoleAssignment +
+    // Get-AzRoleDefinition when az cli isn't available.
+    void loadRbacActions();
 
     void resolveRoleDefinition(const QString &mgmtToken, const QString &roleDefId,
                                std::function<void(const QString &name, const QString &type)> cb);
@@ -127,6 +135,7 @@ private:
 
     // Capabilities tab (derived verdicts)
     QTreeWidget *capabilitiesTree = nullptr;
+    QTreeWidget *actionsTree = nullptr;   // scope+role -> fine-grained actions
     QPushButton *copyCapabilitiesBtn = nullptr;
 
     // Groups / Roles tab
@@ -177,6 +186,14 @@ private:
     bool m_defaultAllowedToCreateSecurityGroups = false;
     bool m_defaultAllowedToReadOtherUsers = true;   // tenant default is `true`
     bool m_defaultAllowedToCreateTenants = false;
+    // Fine-grained ARM RBAC actions enumerated via az cli / Az PS. Both
+    // dedup sets across every assignment scope this identity holds.
+    QSet<QString> m_allControlActions;   // control-plane actions[]
+    QSet<QString> m_allDataActions;      // dataActions[]
+    // For the display tree: scope -> {roleName -> {actions}}
+    QList<QJsonObject> m_rbacActionRows; // one entry per {scope, roleName}
+    bool m_actionsLoaded = false;
+    QString m_actionsSource;             // "azcli" | "azps" | ""
     int m_pending = 0;
     int m_rbacRoleLookups = 0;
     // roleDefinitionId -> {name, type ("BuiltInRole"|"CustomRole")}
