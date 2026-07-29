@@ -108,10 +108,23 @@ void AzureStorageWindow::setupUi() {
     authModeCombo->addItem("Connected Account (PowerShell)");
     authModeCombo->setVisible(false);
 
+    // SAS token row - operators sometimes have only a shared-access signature
+    // (from a leaked config, generateSas, or an out-of-band handoff). When set,
+    // dataRequest() appends it to storage URLs and psContextSetup() switches to
+    // -SasToken instead of -UseConnectedAccount. Leaving it blank keeps the
+    // default connected-account path unchanged.
+    auto *sasRow = new QHBoxLayout();
+    sasRow->addWidget(new QLabel("SAS token:", this));
+    sasInput = new QLineEdit(this);
+    sasInput->setPlaceholderText(
+        "optional - full query string, e.g. ?sv=2020-08-04&ss=b&srt=sco&sp=rwdlacx&sig=...");
+    sasInput->setClearButtonEnabled(true);
+    sasRow->addWidget(sasInput, 1);
+    authLayout->addLayout(sasRow);
+
     // Hidden fields (kept for compile compat with psContextSetup / dataRequest)
     storageTokenInput = new QLineEdit(this); storageTokenInput->setVisible(false);
     storageTokenStatus = new QLabel(this);   storageTokenStatus->setVisible(false);
-    sasInput = new QLineEdit(this);          sasInput->setVisible(false);
     keyInput = new QLineEdit(this);          keyInput->setVisible(false);
     credUser = new QLineEdit(this);          credUser->setVisible(false);
     credPass = new QLineEdit(this);          credPass->setVisible(false);
@@ -339,11 +352,23 @@ QString AzureStorageWindow::accountHostFor(const QString &acct) const {
 }
 
 QNetworkRequest AzureStorageWindow::dataRequest(const QString &url, bool anonymous) {
+    QString sas = sasInput->text().trimmed();
+
     QNetworkRequest req;
-    if (anonymous)
+    if (!sas.isEmpty()) {
+        // SAS overrides everything else. The SAS *is* the auth - appended to the
+        // URL as query params. Never send a bearer header alongside it: Storage
+        // rejects the request if both are present.
+        if (sas.startsWith('?')) sas.remove(0, 1);
+        QUrl u(url);
+        QString existing = u.query(QUrl::FullyEncoded);
+        u.setQuery(existing.isEmpty() ? sas : (existing + '&' + sas));
+        req = QNetworkRequest(u);
+    } else if (anonymous) {
         req = QNetworkRequest(QUrl(url));
-    else
+    } else {
         req = NetworkHelper::createBearerRequest(url, storageTokenInput->text().trimmed());
+    }
     req.setRawHeader("x-ms-version", "2020-10-02");
     NetworkHelper::setRequestTimeout(req);
     return req;
@@ -404,7 +429,16 @@ void AzureStorageWindow::runPs(const QString &script, std::function<void(bool, c
 }
 
 QString AzureStorageWindow::psContextSetup() const {
-    return QString("$ctx=New-AzStorageContext -StorageAccountName '%1' -UseConnectedAccount").arg(currentStorageAccount);
+    const QString sas = sasInput->text().trimmed();
+    if (!sas.isEmpty()) {
+        // Escape single quotes for embedding inside a single-quoted PS string.
+        QString esc = sas;
+        esc.replace('\'', QStringLiteral("''"));
+        return QString("$ctx=New-AzStorageContext -StorageAccountName '%1' -SasToken '%2'")
+                   .arg(currentStorageAccount, esc);
+    }
+    return QString("$ctx=New-AzStorageContext -StorageAccountName '%1' -UseConnectedAccount")
+               .arg(currentStorageAccount);
 }
 
 // ============================================================================

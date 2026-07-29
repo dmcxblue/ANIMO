@@ -173,8 +173,29 @@ public:
             bool restored = window->restoreGeometry(geometry);
             settings.endGroup();
 
-            // Validate that window is on a visible screen
             if (restored) {
+                // Un-maximize. `QWidget::saveGeometry` serialises the maximized
+                // flag, and once a plugin window has been maximized (or opened
+                // from a persisted state that came from a bigger screen) every
+                // subsequent open of that class of window comes up eating the
+                // whole screen. Operators want their normal-mode size back.
+                if (window->isMaximized() || (window->windowState() & Qt::WindowMaximized)) {
+                    window->setWindowState(window->windowState() & ~Qt::WindowMaximized);
+                }
+                // Clamp size to at most 90% of the current screen so a
+                // multi-monitor state persisted on a 4K panel doesn't render
+                // the window unusable on a 1080p laptop.
+                QScreen *screen = window->screen();
+                if (!screen) screen = QApplication::primaryScreen();
+                if (screen) {
+                    const QRect avail = screen->availableGeometry();
+                    const int maxW = int(avail.width()  * 0.90);
+                    const int maxH = int(avail.height() * 0.90);
+                    const QSize s = window->size();
+                    if (s.width() > maxW || s.height() > maxH) {
+                        window->resize(qMin(s.width(), maxW), qMin(s.height(), maxH));
+                    }
+                }
                 ensureOnScreen(window);
             }
             return restored;
