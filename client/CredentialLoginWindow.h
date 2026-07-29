@@ -49,6 +49,7 @@ private:
 private:
     DashboardWindow *parentDashboard = nullptr;
     QComboBox *resourceDropdown = nullptr;
+    QLineEdit *customResource = nullptr;   // Shown only when "Other..." is picked
     QLineEdit *username = nullptr;
     QLineEdit *password = nullptr;
 

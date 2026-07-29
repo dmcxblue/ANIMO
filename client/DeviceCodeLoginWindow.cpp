@@ -197,7 +197,16 @@ void DeviceCodeLoginWindow::startFullServerSession() {
     fullSessionMode = true;
     fullSessionSid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    pendingResource = QStringLiteral("https://management.azure.com");
+
+    // Honour the operator-typed resource. The field default is the v2 SCOPE form
+    // (".../.default"); Az PS's -ResourceUrl wants the v1 audience without the
+    // suffix, so strip it. Empty -> ARM default.
+    pendingResource = resourceInput->text().trimmed();
+    if (pendingResource.isEmpty()) {
+        pendingResource = QStringLiteral("https://management.azure.com");
+    } else if (pendingResource.endsWith(QStringLiteral("/.default"))) {
+        pendingResource.chop(QStringLiteral("/.default").size());
+    }
 
     createStatusWidget(fullSessionSid);
     if (statusWidgets.contains(fullSessionSid))

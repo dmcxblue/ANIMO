@@ -1,4 +1,4 @@
-param([string]$CredentialFile)
+param([string]$CredentialFile,[string]$Resource='https://management.azure.com')
 $ErrorActionPreference='Stop'
 try {
     if(-not(Test-Path $CredentialFile)){throw "Credential file not found"}
@@ -37,6 +37,15 @@ try {
             $azOut = (& az login --service-principal -u $AppId -p $ClientSecret --tenant $TenantId --allow-no-subscriptions --output none) 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Output "[Animo] az cli logged in as SPN (both Az PS and az cli contexts active)"
+                # Warm the az cli token cache for the chosen resource so both
+                # toolchains have parity. Silent on failure - Az PS still emitted
+                # __ANIMO_TOKEN__ below.
+                try {
+                    $azTok = (& az account get-access-token --resource $Resource -o tsv --query accessToken 2>$null)
+                    if ($LASTEXITCODE -eq 0 -and $azTok) {
+                        Write-Output "[Animo] az cli minted token for $Resource"
+                    }
+                } catch {}
             } else {
                 Write-Output ("[Animo] az cli login failed (exit {0}): {1}" -f $LASTEXITCODE, ($azOut | Out-String).Trim())
             }
@@ -50,7 +59,7 @@ try {
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
         try{
-            $tok=Get-AzAccessToken -EA SilentlyContinue
+            $tok=Get-AzAccessToken -ResourceUrl $Resource -EA SilentlyContinue
             if($tok-and$tok.Token){Write-Output "__ANIMO_TOKEN__:$($tok.Token)"}
         }catch{}
         Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"

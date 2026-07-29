@@ -391,10 +391,17 @@ void SPNLoginWindow::authenticateViaPowerShell(const QString &appId,
 
     pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);
 
+    // Use whatever resource the operator picked in the dropdown - not a
+    // hardcoded ARM. pendingResource is populated when the user changes the
+    // dropdown; if it's empty (window opened but never touched), default to
+    // ARM.
+    QString resource = pendingResource;
+    if (resource.isEmpty()) resource = QStringLiteral("https://management.azure.com");
+
     QJsonObject req;
     req.insert(Protocol::F_ACTION, Protocol::ACTION_NEW_SESSION);
     req.insert("mode",         QStringLiteral("spn"));
-    req.insert("resource",     QStringLiteral("https://management.azure.com"));
+    req.insert("resource",     resource);
     req.insert("appId",        appId);
     req.insert("clientSecret", secret);
     req.insert("tenantId",     tenantId);

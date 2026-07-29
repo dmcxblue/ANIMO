@@ -862,8 +862,8 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
     // ── Create session (credentials or raw) ────────────────────────────────────
     if (action == Protocol::ACTION_NEW_SESSION) {
         const QString mode     = obj.value("mode").toString();
-        const QString resource = obj.value("resource").toString(APP_CONFIG.defaultClientId().isEmpty()
-            ? QStringLiteral("https://management.azure.com") : QStringLiteral("https://management.azure.com"));
+        QString resource = obj.value("resource").toString().trimmed();
+        if (resource.isEmpty()) resource = QStringLiteral("https://management.azure.com");
         QString sid            = obj.value("sessionId").toString().trimmed();
         if (sid.isEmpty()) sid = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString rid      = obj.value("rid").toString();
@@ -1000,8 +1000,8 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             }
 
             // Use single quotes with proper escaping to prevent command injection
-            QString execCmd = QString(". \"%1\" -Username '%2' -Password '%3'\n")
-                .arg(ps1Path, escapePsString(user), escapePsString(pass));
+            QString execCmd = QString(". \"%1\" -Username '%2' -Password '%3' -Resource '%4'\n")
+                .arg(ps1Path, escapePsString(user), escapePsString(pass), escapePsString(resource));
             proc->write(execCmd.toUtf8());
 
             QJsonObject ack = Protocol::ok("new_session ok");
@@ -1039,7 +1039,8 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             }
 
             // No credentials to pass - the device-code prompt streams to the Session Tab.
-            QString execCmd = QString(". \"%1\"\n").arg(ps1Path);
+            QString execCmd = QString(". \"%1\" -Resource '%2'\n")
+                .arg(ps1Path, escapePsString(resource));
             proc->write(execCmd.toUtf8());
 
             QJsonObject ack = Protocol::ok("new_session ok");
@@ -1107,15 +1108,15 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
                 spnMeta.insert("user",     appId);
                 spnMeta.insert("tenantId", tenantId);
                 spnMeta.insert("domain",   QStringLiteral("ServicePrincipal"));
-                spnMeta.insert("resource", QStringLiteral("https://management.azure.com"));
+                spnMeta.insert("resource", resource);
                 g_sessionInfo.insert(sid, spnMeta);
             }
             SessionDBManager::instance().updateSessionUser(sid, appId);
             SessionDBManager::instance().updateSessionTenant(sid, tenantId, QStringLiteral("ServicePrincipal"));
 
             // Pass only the credential file path, not the secret itself
-            QString execCmd = QString(". \"%1\" -CredentialFile \"%2\"\n")
-                .arg(ps1Path, credPath);
+            QString execCmd = QString(". \"%1\" -CredentialFile \"%2\" -Resource '%3'\n")
+                .arg(ps1Path, credPath, escapePsString(resource));
             proc->write(execCmd.toUtf8());
 
             // The script deletes this after reading, but wipe it here too in case

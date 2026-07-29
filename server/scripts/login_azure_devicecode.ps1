@@ -1,3 +1,4 @@
+param([string]$Resource='https://management.azure.com')
 $ErrorActionPreference='Stop'
 # Full interactive login: device code runs INSIDE Az, so the context keeps a real
 # token cache + refresh token. Unlike -AccessToken, this lets Get-AzAccessToken mint
@@ -12,7 +13,7 @@ try {
         ForEach-Object { Write-Output $_ }
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
-        try{$t=(Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
+        try{$t=(Get-AzAccessToken -ResourceUrl $Resource -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
         # az cli is a separate binary with its own token cache. For device-code
         # login we deliberately don't call `az login` here - it would prompt the
         # operator for a SECOND device code, which is confusing. If they need az
@@ -20,6 +21,7 @@ try {
         try {
             if (Get-Command az -EA SilentlyContinue) {
                 Write-Output "[Animo] To use az cli in this session run:  az login --use-device-code --tenant $($ctx.Tenant.Id)"
+                Write-Output "[Animo] Then:  az account get-access-token --resource $Resource"
             }
         } catch {}
         Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"

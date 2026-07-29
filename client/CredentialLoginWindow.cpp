@@ -31,9 +31,29 @@ void CredentialLoginWindow::setupUi() {
     layout->addWidget(new QLabel("Select resource and enter credentials"));
 
     resourceDropdown = new QComboBox(this);
-    resourceDropdown->addItem("Azure Management (management.azure.com)");
-    resourceDropdown->addItem("Microsoft Graph (graph.microsoft.com)");
+    resourceDropdown->addItem("Azure Management (management.azure.com)",
+                              QStringLiteral("https://management.azure.com"));
+    resourceDropdown->addItem("Microsoft Graph (graph.microsoft.com)",
+                              QStringLiteral("https://graph.microsoft.com"));
+    resourceDropdown->addItem("Key Vault (vault.azure.net)",
+                              QStringLiteral("https://vault.azure.net"));
+    resourceDropdown->addItem("Azure Storage (storage.azure.com)",
+                              QStringLiteral("https://storage.azure.com"));
+    resourceDropdown->addItem("SQL Database (database.windows.net)",
+                              QStringLiteral("https://database.windows.net"));
+    resourceDropdown->addItem("Other...", QStringLiteral(""));
     layout->addWidget(resourceDropdown);
+
+    // Free-text field shown only when the operator picks "Other..."
+    customResource = new QLineEdit(this);
+    customResource->setPlaceholderText("Custom resource URL, e.g. https://vault.azure.net");
+    customResource->setVisible(false);
+    layout->addWidget(customResource);
+    connect(resourceDropdown, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        const bool isOther = resourceDropdown->currentData().toString().isEmpty();
+        customResource->setVisible(isOther);
+    });
 
     username = new QLineEdit(this);
     username->setPlaceholderText("e.g. alice@contoso.com");
@@ -97,10 +117,17 @@ void CredentialLoginWindow::handleLogin() {
 
     sessionHandled = false;
 
-    if (resourceDropdown->currentIndex() == 1)
-        pendingResource = QStringLiteral("https://graph.microsoft.com");
-    else
-        pendingResource = QStringLiteral("https://management.azure.com");
+    pendingResource = resourceDropdown->currentData().toString();
+    if (pendingResource.isEmpty()) {
+        // "Other..." selected - use the free-text field. Empty falls back to ARM.
+        pendingResource = customResource->text().trimmed();
+        if (pendingResource.isEmpty())
+            pendingResource = QStringLiteral("https://management.azure.com");
+        // Strip a trailing "/.default" scope suffix so -ResourceUrl gets a
+        // v1 audience URL.
+        if (pendingResource.endsWith(QStringLiteral("/.default")))
+            pendingResource.chop(QStringLiteral("/.default").size());
+    }
 
     pendingUsername = user;
     pendingRid = QUuid::createUuid().toString(QUuid::WithoutBraces);

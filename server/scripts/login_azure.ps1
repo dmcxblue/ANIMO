@@ -1,4 +1,4 @@
-param([string]$Username,[string]$Password)
+param([string]$Username,[string]$Password,[string]$Resource='https://management.azure.com')
 $ErrorActionPreference='Stop'
 $mfa='AADSTS50076|AADSTS50079|AADSTS50158|AADSTS53003|AADSTS50074|AADSTS500121'
 try {
@@ -11,7 +11,7 @@ try {
     Connect-AzAccount -Credential $c -EA Stop -WA Ignore|Out-Null
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
-        try{$t=(Get-AzAccessToken -ResourceUrl 'https://management.azure.com' -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
+        try{$t=(Get-AzAccessToken -ResourceUrl $Resource -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
         # Also log az cli in with the same ROPC creds so operators can use az one-liners
         # in the same terminal (az cli keeps a separate token cache from Az PS).
         try {
@@ -22,6 +22,15 @@ try {
                 $azOut = (& az @azArgs) 2>&1
                 if ($LASTEXITCODE -eq 0) {
                     Write-Output "[Animo] az cli logged in (both Az PS and az cli contexts active)"
+                    # Also mint a resource-specific token via az cli so both toolchains
+                    # have a matching token for the chosen resource. Silent on failure -
+                    # the Az PS __ANIMO_TOKEN__ above is what the server captures.
+                    try {
+                        $azTok = (& az account get-access-token --resource $Resource -o tsv --query accessToken 2>$null)
+                        if ($LASTEXITCODE -eq 0 -and $azTok) {
+                            Write-Output "[Animo] az cli minted token for $Resource"
+                        }
+                    } catch {}
                 } else {
                     Write-Output ("[Animo] az cli login failed (exit {0}): {1}" -f $LASTEXITCODE, ($azOut | Out-String).Trim())
                 }
