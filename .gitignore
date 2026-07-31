@@ -33,6 +33,14 @@ error.log.*
 *.animosession
 *.animosessions
 
+# Engagement output - never commit captured data
+loot/
+
+# Runtime state that lands at the repo root depending on the launch dir
+saved_sessions.dat
+device_certs.dat
+history_*.txt
+
 # IDE / Editor
 .vscode/
 .idea/

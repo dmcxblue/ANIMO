@@ -167,16 +167,22 @@ void WHfBAttackWindow::setLoading(bool loading) {
 }
 
 QString WHfBAttackWindow::findPythonScript() {
+    QString appDir = QCoreApplication::applicationDirPath();
     QStringList searchPaths = {
-        QCoreApplication::applicationDirPath() + "/../helpers/DeviceCode2WFH.py",
-        QCoreApplication::applicationDirPath() + "/../../helpers/DeviceCode2WFH.py",
+        appDir + "/../../helpers/DeviceCode2WFH.py",
+        appDir + "/../helpers/DeviceCode2WFH.py",
+        appDir + "/helpers/DeviceCode2WFH.py",
+        appDir + "/DeviceCode2WFH.py",
         QDir::currentPath() + "/helpers/DeviceCode2WFH.py",
-        "/home/dmcxblue/Documents/OffensiveTools/Azure/ANIMO/helpers/DeviceCode2WFH.py"
+        "../../helpers/DeviceCode2WFH.py",
+        "../helpers/DeviceCode2WFH.py",
+        "helpers/DeviceCode2WFH.py",
+        "DeviceCode2WFH.py"
     };
 
     for (const QString &path : searchPaths) {
         QFileInfo fi(path);
-        if (fi.exists()) {
+        if (fi.exists() && fi.isFile()) {
             return fi.absoluteFilePath();
         }
     }

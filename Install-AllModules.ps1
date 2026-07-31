@@ -1,230 +1,223 @@
-$ErrorActionPreference = 'Stop'
-Write-Host "`n--- Azure Tool Setup ---`n"
+<#
+.SYNOPSIS
+    Installs the PowerShell modules and CLI tools ANIMO drives.
 
-function Remove-AllAzureModules {
-    Write-Host "`n--- Starting removal of all Azure-related modules ---`n"
-    
-    Write-Host "Removing AzureRM modules..."
-    Get-Module -ListAvailable AzureRM* | ForEach-Object {
-        Write-Host "Removing: $($_.Name)"
-        Uninstall-Module -Name $_.Name -AllVersions -Force -ErrorAction SilentlyContinue
-    }
-    
-    Write-Host "`nRemoving Az modules..."
-    Get-Module -ListAvailable Az* | ForEach-Object {
-        Write-Host "Removing: $($_.Name)"
-        Uninstall-Module -Name $_.Name -AllVersions -Force -ErrorAction SilentlyContinue
-    }
-    
-    Write-Host "`nRemoving any modules starting with 'Azure'..."
-    Get-Module -ListAvailable Azure* | ForEach-Object {
-        Write-Host "Removing: $($_.Name)"
-        Uninstall-Module -Name $_.Name -AllVersions -Force -ErrorAction SilentlyContinue
-    }
-    
-    Write-Host "`nRemoving AzureAD modules..."
-    Get-Module -ListAvailable AzureAD | ForEach-Object {
-        Write-Host "Removing: AzureAD"
-        Uninstall-Module -Name AzureAD -AllVersions -Force -ErrorAction SilentlyContinue
-    }   
-    
-    Write-Host "`nRemoving Microsoft Graph modules..."
-    Get-Module -ListAvailable Microsoft.Graph | ForEach-Object {
-        Write-Host "Removing: $($_.Name)"
-        Uninstall-Module -Name $_.Name -AllVersions -Force -ErrorAction SilentlyContinue
-    }
-    
-    Write-Host "`nRemoving AADInternals modules..."
-    Get-Module -ListAvailable AADInternals | ForEach-Object {
-        Write-Host "Removing: $($_.Name)"
-        Uninstall-Module -Name $_.Name -AllVersions -Force -ErrorAction SilentlyContinue
-    }
-    
-    Write-Host "`n--- All specified Azure modules have been removed ---`n"
-}
+.DESCRIPTION
+    Runs on Windows PowerShell 5.1, and on PowerShell 7 on Windows, Linux and
+    macOS. Modules that only exist on Windows (AzureAD, and the winget-installed
+    CLI tools) are skipped with a message on other platforms rather than failing.
 
-Remove-AllAzureModules
+    This script is additive. It never uninstalls modules you already have.
 
-Start-Sleep -Seconds 2
+.EXAMPLE
+    pwsh -File Install-AllModules.ps1
 
-# Verify module removals
-Write-Host "`n--- Verifying module removals ---`n"
-$modulesToCheck = @("AzureRM", "Az", "AzureAD", "AzureADPreview", "Microsoft.Graph")
-foreach ($mod in $modulesToCheck) {
-    if (Get-Module -ListAvailable $mod) {
-        Write-Warning "$mod modules still exist."
-    } else {
-        Write-Host "$mod modules removed."
-    }
-}
-
-Write-Host "`n--- Reinstalling stable Azure modules ---`n"
-# Install stable Az and AzureAD modules
-Install-Module -Name Az -Scope CurrentUser -Force
-Install-Module -Name AzureAD -Scope CurrentUser -Force
-
-# AADInternals
-
-# Install the module
-Install-Module -Name "AADInternals" -Scope CurrentUser -Force
-Install-Module -Name "AADInternals-Endpoints" -Scope CurrentUser -Force
-
-# Import modules
-Import-Module -Name "AADInternals"
-Import-Module -Name "AADInternals-Endpoints"
-
-# SQL
-
-Install-Module -Name SqlServer -Scope CurrentUser -Force 
-Import-Module -Name SqlServer
-
-# AzTable I needed it for PWNDLabs
-
-Install-Module AzTable -Scope CurrentUser -Force
-
-# Microsoft Graph
-
-Install-Module -Name Microsoft.Graph -Scope CurrentUser -Force
-
-# New function: Ensure additional Azure sub-modules (including Microsoft Graph) are installed.
-function Ensure-AzureModules {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string[]]$ModuleNames
-    )
-    foreach ($mod in $ModuleNames) {
-        if (-not (Get-Module -ListAvailable $mod)) {
-            Write-Host "$mod not found. Installing..."
-            Install-Module -Name $mod -Scope CurrentUser -Force -ErrorAction Stop
-            Write-Host "$mod installed successfully."
-        } else {
-            Write-Host "$mod is already installed."
-        }
-    }
-}
-
-# List of additional Azure sub-modules to ensure are installed (Microsoft.Graph included)
-$additionalModules = @(
-    "Az.Accounts",
-    "Az.Compute",
-    "Az.Network",
-    "Az.Resources",
-    "Az.Storage",
-    "Az.KeyVault",
-    "Az.Monitor",
-    "Az.Security",
-    "Az.Automation",
-    "Az.Functions",
-    "Microsoft.Graph"
+.EXAMPLE
+    # Skip the ~2 GB umbrella Az module and install only the submodules ANIMO uses
+    pwsh -File Install-AllModules.ps1 -SkipUmbrellaAz
+#>
+[CmdletBinding()]
+param(
+    # Install only the Az.* submodules ANIMO calls, not the full Az meta-module.
+    [switch]$SkipUmbrellaAz
 )
 
-Ensure-AzureModules -ModuleNames $additionalModules
+# Continue, not Stop: one unavailable module should not abort the whole install.
+$ErrorActionPreference = 'Continue'
 
-# Function to ensure that winget (Windows Package Manager) is installed
+# $IsWindows is a PowerShell 6+ automatic variable. On Windows PowerShell 5.1 it
+# is undefined, and that edition only ever runs on Windows.
+$onWindows = $IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')
+
+Write-Host ""
+Write-Host "--- ANIMO module setup ---" -ForegroundColor Cyan
+Write-Host "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition)) on $(if ($onWindows) { 'Windows' } else { 'Unix' })"
+Write-Host ""
+
+# ---------------------------------------------------------------------------
+# Gallery bootstrap
+# ---------------------------------------------------------------------------
+
+function Initialize-Gallery {
+    # Windows PowerShell 5.1 ships without the NuGet provider and defaults to
+    # TLS 1.0, both of which break Install-Module against the gallery.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        } catch {
+            Write-Warning "Could not force TLS 1.2: $($_.Exception.Message)"
+        }
+        if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing NuGet package provider..."
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+        }
+    }
+
+    $gallery = Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue
+    if ($gallery -and $gallery.InstallationPolicy -ne 'Trusted') {
+        Write-Host "Trusting PSGallery for this user..."
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Module installation
+# ---------------------------------------------------------------------------
+
+function Ensure-Module {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Note
+    )
+
+    if (Get-Module -ListAvailable -Name $Name -ErrorAction SilentlyContinue) {
+        Write-Host ("  {0,-26} already installed" -f $Name) -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host ("  {0,-26} installing..." -f $Name)
+    try {
+        # -AllowClobber: Az command names collide with leftover AzureRM installs.
+        Install-Module -Name $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        Write-Host ("  {0,-26} OK" -f $Name) -ForegroundColor Green
+    } catch {
+        Write-Warning ("{0}: {1}" -f $Name, $_.Exception.Message)
+        if ($Note) { Write-Host "      $Note" -ForegroundColor Yellow }
+    }
+}
+
+Initialize-Gallery
+
+# Az submodules ANIMO actually calls. Installing these individually is far
+# smaller than the umbrella Az module and covers every Az cmdlet in the codebase.
+$azSubmodules = @(
+    'Az.Accounts'    # Connect-AzAccount, Get-AzAccessToken, Get-AzContext
+    'Az.Resources'   # Get-AzResource, Get-AzRoleAssignment, Get-AzADServicePrincipal
+    'Az.Compute'     # Get-AzVM, Get-AzVMImage, Get-AzVMSize
+    'Az.Network'     # Get-AzVirtualNetwork, Get-AzNetworkSecurityGroup
+    'Az.Storage'     # Get-AzStorageAccount, Get-AzStorageBlob, SAS tokens
+    'Az.KeyVault'    # Get-AzKeyVaultSecret, Get-AzKeyVaultKey
+    'Az.Monitor'
+)
+
+# Modules that install and load on every platform.
+$crossPlatform = @(
+    @{ Name = 'Microsoft.Graph' }
+    @{ Name = 'SqlServer' }        # Invoke-SqlCmd, used by SqlDatabaseWindow
+    @{ Name = 'AADInternals'; Note = 'Some AADInternals cmdlets are Windows-only.' }
+    @{ Name = 'AADInternals-Endpoints'; Note = 'Some cmdlets are Windows-only.' }
+    @{ Name = 'AzTable' }
+)
+
+Write-Host "Az submodules:" -ForegroundColor Cyan
+foreach ($m in $azSubmodules) { Ensure-Module -Name $m }
+
+if (-not $SkipUmbrellaAz) {
+    Write-Host ""
+    Write-Host "Umbrella Az module (large - use -SkipUmbrellaAz to omit):" -ForegroundColor Cyan
+    Ensure-Module -Name 'Az'
+}
+
+Write-Host ""
+Write-Host "Cross-platform modules:" -ForegroundColor Cyan
+foreach ($m in $crossPlatform) { Ensure-Module -Name $m.Name -Note $m.Note }
+
+# ---------------------------------------------------------------------------
+# Windows-only: AzureAD module and the winget-installed CLI tools
+# ---------------------------------------------------------------------------
+
 function Ensure-Winget {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Host "winget not found. Downloading and installing the official winget MSIX bundle..."
-        # Download the official winget MSIX bundle from Microsoft's GitHub release page.
-        $installerUrl = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
-        $installerPath = "$env:TEMP\winget.msixbundle"
-        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
-        Write-Host "Installing winget package..."
-        # Install the downloaded MSIX bundle. Note that Add-AppxPackage may require administrator privileges.
-        Add-AppxPackage -Path $installerPath
-        Remove-Item $installerPath
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "  winget                     already installed" -ForegroundColor DarkGray
+        return $true
     }
-    else {
-        Write-Host "winget is already installed."
-    }
-}
 
-Ensure-Winget
-
-# Azure CLI check/install function using winget
-function Ensure-AzCLI {
-    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-        Write-Host "Azure CLI not found. Installing via winget..."
-        winget install -e --id Microsoft.AzureCLI --accept-source-agreements --accept-package-agreements
-    } else {
-        Write-Host "Azure CLI is already installed. Updating via winget..."
-        winget upgrade -e --id Microsoft.AzureCLI --accept-source-agreements --accept-package-agreements
+    Write-Host "  winget                     installing App Installer bundle..."
+    try {
+        $installerUrl = 'https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+        $installerPath = Join-Path $env:TEMP 'winget.msixbundle'
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -ErrorAction Stop
+        # May require elevation.
+        Add-AppxPackage -Path $installerPath -ErrorAction Stop
+        Remove-Item $installerPath -ErrorAction SilentlyContinue
+        return [bool](Get-Command winget -ErrorAction SilentlyContinue)
+    } catch {
+        Write-Warning "winget install failed: $($_.Exception.Message)"
+        return $false
     }
 }
 
-# Azure Function Core Tools check/install function using winget
-function Ensure-FuncTools {
-    if (-not (Get-Command func -ErrorAction SilentlyContinue)) {
-        Write-Host "Azure Function Core Tools not found. Installing via winget..."
-        winget install -e --id Microsoft.Azure.FunctionsCoreTools --accept-source-agreements --accept-package-agreements
-    } else {
-        Write-Host "Azure Function Core Tools already installed. Updating via winget..."
-        winget upgrade -e --id Microsoft.Azure.FunctionsCoreTools --accept-source-agreements --accept-package-agreements
-    }
-}
-
-#Install Git Module from winget
-function Ensure-Git {
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Host "Git not found. Installing via winget..."
-        winget install --id Git.Git --accept-source-agreements --accept-package-agreements
-    } else {
-        Write-Host "Git is already installed. Updating via winget..."
-        winget upgrade -e --id Git.Git --accept-source-agreements --accept-package-agreements
-    }
-}
-
-# Call installers for CLI and Function Tools
-Ensure-AzCLI
-Ensure-FuncTools
-Ensure-Git
-
-
-# Function to clone GitHub repositories
-function Clone-GitHubTools {
+function Ensure-WingetPackage {
     param(
-        [Parameter(Mandatory = $true)]
-        [string[]]$RepoURLs,
-        [string]$DestinationPath = "."
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][string]$Command,
+        [Parameter(Mandatory)][string]$Label
     )
-    
-    # Create destination folder if it doesn't exist
-    if (-not (Test-Path $DestinationPath)) {
-        New-Item -ItemType Directory -Path $DestinationPath | Out-Null
+
+    if (Get-Command $Command -ErrorAction SilentlyContinue) {
+        Write-Host ("  {0,-26} already installed" -f $Label) -ForegroundColor DarkGray
+        return
     }
-    
-    foreach ($url in $RepoURLs) {
-        Write-Host "Cloning repository from $url"
-        # Extract repository name from URL (assumes URL ends with .git)
-        $repoName = ($url.Split("/")[-1]).Replace(".git", "")
-        $targetFolder = Join-Path $DestinationPath $repoName
-        if (Test-Path $targetFolder) {
-            Write-Host "Repository '$repoName' already exists in $DestinationPath, skipping clone."
-        } else {
-            git clone $url $targetFolder
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully cloned '$repoName'."
-            } else {
-                Write-Warning "Failed to clone '$repoName' from $url."
-            }
-        }
+
+    Write-Host ("  {0,-26} installing via winget..." -f $Label)
+    winget install -e --id $Id --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "$Label install returned exit code $LASTEXITCODE."
     }
 }
 
-# Clone the specified GitHub repositories
-$repos = @(
-    "https://github.com/LuemmelSec/APEX.git",
-    "https://github.com/hausec/PowerZure.git",
-	"https://github.com/f-bader/TokenTacticsV2.git",
-	"https://github.com/dirkjanm/ROADtools.git",
-	"https://github.com/Azure/Stormspotter.git",
-	"https://github.com/NetSPI/MicroBurst.git",
-	"https://gist.github.com/xpn/f12b145dba16c2eebdd1c6829267b90c",
-	"https://github.com/dafthack/MFASweep.git",
-	"https://github.com/dafthack/MSOLSpray.git",
-	"https://github.com/Gerenios/AADInternals.git",
-	"https://github.com/YasserREED/Office365Hacker.git",
-	"https://github.com/lutzenfried/OffensiveCloud.git"
-)
-Clone-GitHubTools -RepoURLs $repos -DestinationPath "."
+Write-Host ""
+if ($onWindows) {
+    Write-Host "Windows-only modules:" -ForegroundColor Cyan
+    # AzureAD targets .NET Framework and cannot be imported by PowerShell 7.
+    # It installs fine, but only Windows PowerShell 5.1 can load it.
+    Ensure-Module -Name 'AzureAD' `
+        -Note 'AzureAD loads only under Windows PowerShell 5.1, not pwsh 7.'
+    if ($PSVersionTable.PSEdition -ne 'Desktop') {
+        Write-Host "      Note: import AzureAD from Windows PowerShell 5.1, or use" -ForegroundColor Yellow
+        Write-Host "      Import-Module AzureAD -UseWindowsPowerShell from pwsh 7." -ForegroundColor Yellow
+    }
 
-Write-Host "`n Environment cleaned, Azure modules (including Microsoft Graph) reinstalled, sub-modules ensured, and tools updated successfully.`n" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Windows CLI tools:" -ForegroundColor Cyan
+    if (Ensure-Winget) {
+        Ensure-WingetPackage -Id 'Microsoft.AzureCLI'                -Command 'az'   -Label 'Azure CLI'
+        Ensure-WingetPackage -Id 'Microsoft.Azure.FunctionsCoreTools' -Command 'func' -Label 'Functions Core Tools'
+        Ensure-WingetPackage -Id 'Git.Git'                           -Command 'git'  -Label 'Git'
+    } else {
+        Write-Host "  winget unavailable - install az, func and git manually." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "Skipping Windows-only components on this platform:" -ForegroundColor Cyan
+    Write-Host "  AzureAD    - .NET Framework only; cannot load on pwsh 7."
+    Write-Host "               ANIMO panels that need it degrade rather than break."
+    Write-Host "  winget     - Windows package manager."
+    Write-Host "  az / func / git - install via ./install-dependencies.sh or your"
+    Write-Host "               distro package manager."
+}
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+Write-Host ""
+Write-Host "--- Verifying ---" -ForegroundColor Cyan
+$check = $azSubmodules + $crossPlatform.Name
+if (-not $SkipUmbrellaAz) { $check += 'Az' }
+if ($onWindows) { $check += 'AzureAD' }
+
+foreach ($m in $check) {
+    $found = Get-Module -ListAvailable -Name $m -ErrorAction SilentlyContinue
+    if ($found) {
+        $ver = ($found.Version | Select-Object -Unique | Sort-Object -Descending | Select-Object -First 1)
+        Write-Host ("  {0,-26} {1}" -f $m, $ver) -ForegroundColor Green
+    } else {
+        Write-Host ("  {0,-26} MISSING" -f $m) -ForegroundColor Red
+    }
+}
+
+Write-Host ""
+Write-Host "Done. No modules were removed and nothing was cloned into this directory." -ForegroundColor Green
+Write-Host "Third-party tooling ANIMO pairs well with is listed under 'Related Tooling'"
+Write-Host "in README.md - clone those outside this repository."
+Write-Host ""

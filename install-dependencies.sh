@@ -1,39 +1,112 @@
 #!/usr/bin/env bash
+#
+# install-dependencies.sh - Debian/Ubuntu/Kali build and runtime dependencies.
+#
+# Installs the Qt6 + CMake toolchain ANIMO builds against, PowerShell 7, and
+# (optionally) the Azure CLI. For the PowerShell modules themselves, run
+# `pwsh -File Install-AllModules.ps1` afterwards.
+#
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Update package lists
+echo "[*] Updating package lists..."
 sudo apt-get update
 
-# Install toolchain + Qt6 deps
+echo "[*] Installing toolchain and Qt6 development packages..."
 sudo apt-get install -y --no-install-recommends \
   build-essential \
   cmake \
   ninja-build \
+  curl \
+  ca-certificates \
   qt6-base-dev \
-  qt6-tools-dev \
-  qt6-tools-dev-tools \
+  qt6-base-dev-tools \
   qt6-webengine-dev \
   qt6-webengine-dev-tools \
-  qt6-websockets-dev \
+  libqt6svg6 \
   libqt6sql6 \
   libqt6sql6-sqlite \
-  libssl-dev \
-  snapd
+  libssl-dev
 
-sudo snap install powershell --classic
+# ---------------------------------------------------------------------------
+# PowerShell 7
+#
+# Kali does not ship snapd and enabling it there is unreliable, so prefer the
+# .deb Microsoft publishes on GitHub and fall back to snap only if that fails.
+# ---------------------------------------------------------------------------
 
-# Azure CLI - login scripts opportunistically call `az login` alongside
-# Connect-AzAccount so operators can run `az` one-liners in the session
-# terminal. If az isn't on PATH the login scripts skip it cleanly, so
-# this install is optional but recommended.
-if ! command -v az >/dev/null 2>&1; then
-  curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash || {
-    echo "[!] az cli install failed - continuing without it. Login scripts will skip az login."
-  }
+install_powershell_deb() {
+    local arch deb_arch url tmp
+    arch="$(dpkg --print-architecture)"
+    case "$arch" in
+        amd64) deb_arch="x64" ;;
+        arm64) deb_arch="arm64" ;;
+        *)     echo "[!] No PowerShell .deb for architecture '$arch'."; return 1 ;;
+    esac
+
+    echo "[*] Resolving latest PowerShell release..."
+    local version
+    version="$(curl -fsSL https://api.github.com/repos/PowerShell/PowerShell/releases/latest \
+        | grep -oP '"tag_name":\s*"v\K[^"]+' || true)"
+    if [ -z "$version" ]; then
+        echo "[!] Could not determine the latest PowerShell version."
+        return 1
+    fi
+
+    url="https://github.com/PowerShell/PowerShell/releases/download/v${version}/powershell_${version}-1.deb_${deb_arch}.deb"
+    tmp="$(mktemp -d)"
+    echo "[*] Downloading PowerShell ${version} (${deb_arch})..."
+    if ! curl -fsSL -o "$tmp/powershell.deb" "$url"; then
+        echo "[!] Download failed: $url"
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    # apt-get install on a local .deb pulls its dependencies; dpkg alone would not.
+    sudo apt-get install -y "$tmp/powershell.deb"
+    rm -rf "$tmp"
+}
+
+install_powershell_snap() {
+    command -v snap >/dev/null 2>&1 || sudo apt-get install -y snapd
+    sudo snap install powershell --classic
+}
+
+if command -v pwsh >/dev/null 2>&1; then
+    echo "[+] PowerShell already installed: $(pwsh --version)"
+else
+    echo "[*] Installing PowerShell 7..."
+    if install_powershell_deb; then
+        echo "[+] PowerShell installed from .deb."
+    elif install_powershell_snap; then
+        echo "[+] PowerShell installed from snap."
+    else
+        echo "[!] PowerShell install failed. ANIMO needs pwsh for its session"
+        echo "    terminal - install it manually before running the server:"
+        echo "    https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux"
+    fi
 fi
 
-# Optional: reduce layer size in containers/CI
-sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/*
+# ---------------------------------------------------------------------------
+# Azure CLI (optional)
+#
+# The login scripts opportunistically call `az login` alongside Connect-AzAccount
+# so operators can run `az` one-liners in the session terminal. If az is missing
+# the login scripts skip it cleanly, so this is recommended but not required.
+# ---------------------------------------------------------------------------
+
+if command -v az >/dev/null 2>&1; then
+    echo "[+] Azure CLI already installed."
+else
+    echo "[*] Installing Azure CLI..."
+    curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash || {
+        echo "[!] az cli install failed - continuing without it."
+        echo "    Login scripts will skip az login."
+    }
+fi
+
+echo
+echo "[+] Dependencies installed."
+echo "    Next: pwsh -File Install-AllModules.ps1"
+echo "    Then: ./build.sh"

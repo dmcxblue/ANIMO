@@ -5,7 +5,7 @@ namespace GrabTokenAzureAD
     class CombinedGrabber
     {
         // ========== HARDCODED CONFIGURATION ==========
-        private const string CALLBACK_URL = "http://192.168.1.21:8000/capture";
+        private const string CALLBACK_URL = "http://127.0.0.1:8000/capture";
         private const string CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2";  // Azure PowerShell
         private const string TENANT = "common";
         private const string REDIRECT_URI = "http://localhost:8400";

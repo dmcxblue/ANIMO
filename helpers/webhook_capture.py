@@ -213,7 +213,7 @@ Examples:
   python3 webhook_capture.py -p 9000
 
   # Start server on specific interface
-  python3 webhook_capture.py -i 192.168.1.61 -p 8000
+  python3 webhook_capture.py -i <LISTENER_IP> -p 8000
 
   # Auto-save captured data
   python3 webhook_capture.py -o captured_prt.json

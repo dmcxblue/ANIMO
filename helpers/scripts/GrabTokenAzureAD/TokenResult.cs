@@ -150,7 +150,7 @@ namespace GrabTokenAzureAD
         public string RedirectUri { get; set; } = "http://localhost:8400";
         public string GraphScope { get; set; } = "offline_access https://graph.microsoft.com/.default";
         public string ManagementScope { get; set; } = "https://management.azure.com/.default";
-        public string CallbackUrl { get; set; } = "http://192.168.1.21:8000/capture";
+        public string CallbackUrl { get; set; } = "http://127.0.0.1:8000/capture";
         public int ListenerTimeoutSeconds { get; set; } = 300;
 
         public string Authority => $"https://login.microsoftonline.com/{Tenant}/oauth2/v2.0";

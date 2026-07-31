@@ -137,7 +137,7 @@ Options:
                             Default: http://localhost:8400
 
   -u, --callback <url>      ANIMO webhook URL to send captured tokens
-                            Default: http://192.168.1.21:8000/capture
+                            Default: http://127.0.0.1:8000/capture
 
   --no-callback             Disable sending tokens to callback URL
 

@@ -56,21 +56,21 @@ ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines *
 
 | Requirement | Version |
 |:------------|:--------|
-| OS | Linux (Kali recommended), macOS, or Windows with WSL2 |
-| Qt6 | 6.2+ (Widgets, Network, WebEngineWidgets, Sql) |
+| OS | Linux (Kali recommended, build verified), macOS, or Windows — natively or via WSL2 |
+| Qt6 | 6.2+ (Widgets, Network, WebEngineWidgets, Sql; plus the Svg image plugin for the app icon) |
 | CMake | 3.16+ |
 | PowerShell | 7.x (`pwsh`) |
 | Azure CLI | 2.x (`az`) — optional but recommended for parity |
 | Python | 3.8+ with `msal`, `requests` |
 
-### Install & Build
+### Install & Build (Linux)
 
 ```bash
 # Clone the repository
 git clone https://github.com/dmcxblue/ANIMO.git
 cd ANIMO
 
-# Install system dependencies (Linux/Kali)
+# Install system dependencies (Debian / Ubuntu / Kali)
 ./install-dependencies.sh
 
 # Install PowerShell modules
@@ -79,6 +79,34 @@ pwsh -File Install-AllModules.ps1
 # Build
 ./build.sh
 ```
+
+### Build on Windows
+
+The CMake project is cross-platform and `Install-AllModules.ps1` runs on both
+platforms, but the build itself is currently only verified on Linux. On Windows,
+install the prerequisites yourself and invoke CMake directly:
+
+```powershell
+# Prerequisites (via winget, or the Qt Online Installer for Qt itself)
+winget install -e --id Kitware.CMake
+winget install -e --id Ninja-build.Ninja
+winget install -e --id ShiningLight.OpenSSL.Light
+# Qt 6.2+ with the Qt WebEngine and Qt SQL modules, plus MSVC (Visual Studio
+# Build Tools with the C++ workload). Note the Qt install prefix.
+
+# PowerShell modules
+pwsh -File Install-AllModules.ps1
+
+# Configure and build - point CMAKE_PREFIX_PATH at your Qt6 install
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DCMAKE_PREFIX_PATH="C:/Qt/6.7.2/msvc2019_64"
+cmake --build build
+```
+
+Binaries land in `build\server\AnimoServer.exe` and `build\client\AnimoClient.exe`.
+The hardening flags in the top-level `CMakeLists.txt` are GCC/Clang-only and are
+skipped under MSVC. `build.sh` and `clean.sh` are bash scripts — use the CMake
+commands above, or run them from WSL2.
 
 ### Launch
 
@@ -540,16 +568,52 @@ AnimoServer [options]
 
 ### Required PowerShell Modules
 
-Installed automatically by `Install-AllModules.ps1`:
+Installed by `Install-AllModules.ps1`. The script is additive — it never removes
+modules you already have — and skips Windows-only components on Linux and macOS
+with a message rather than failing.
 
-| Module | Purpose |
-|:-------|:--------|
-| `Az` | Azure Resource Manager |
-| `AzureAD` | Azure Active Directory |
-| `AADInternals` | Azure AD internals & token operations |
-| `Microsoft.Graph` | Microsoft Graph SDK |
-| `SqlServer` | Azure SQL operations |
-| `AzTable` | Azure Table Storage |
+| Module | Purpose | Platform |
+|:-------|:--------|:---------|
+| `Az.Accounts`, `Az.Resources`, `Az.Compute`, `Az.Network`, `Az.Storage`, `Az.KeyVault`, `Az.Monitor` | The Az cmdlets ANIMO actually calls | Any |
+| `Az` | Umbrella meta-module (~2 GB; skip with `-SkipUmbrellaAz`) | Any |
+| `Microsoft.Graph` | Microsoft Graph SDK | Any |
+| `SqlServer` | `Invoke-SqlCmd` for the SQL Database module | Any |
+| `AADInternals` | Azure AD internals & token operations | Any (some cmdlets Windows-only) |
+| `AADInternals-Endpoints` | AADInternals endpoint helpers | Any (some cmdlets Windows-only) |
+| `AzTable` | Azure Table Storage | Any |
+| `AzureAD` | Azure Active Directory (legacy) | **Windows only** |
+
+`AzureAD` targets .NET Framework and cannot be imported by PowerShell 7 — use
+Windows PowerShell 5.1, or `Import-Module AzureAD -UseWindowsPowerShell` from
+pwsh 7 on Windows. On Linux the `Get-AzureAD*` terminal autocompletions remain
+available but the cmdlets will not resolve; every ANIMO panel has an Az or Graph
+code path, so nothing depends on `AzureAD` being present.
+
+On Windows the script also installs `az`, `func`, and `git` via winget. On Linux,
+`az` comes from `install-dependencies.sh`.
+
+### Related Tooling
+
+ANIMO pairs well with these projects. Clone them **outside** this repository:
+
+```bash
+mkdir -p ~/tools && cd ~/tools
+```
+
+| Project | Purpose |
+|:--------|:--------|
+| [AADInternals](https://github.com/Gerenios/AADInternals) | Azure AD internals research toolkit |
+| [ROADtools](https://github.com/dirkjanm/ROADtools) | Azure AD exploration and enumeration |
+| [TokenTacticsV2](https://github.com/f-bader/TokenTacticsV2) | Token manipulation and family refresh abuse |
+| [APEX](https://github.com/LuemmelSec/APEX) | Azure privilege escalation toolkit |
+| [PowerZure](https://github.com/hausec/PowerZure) | Azure post-exploitation framework |
+| [MicroBurst](https://github.com/NetSPI/MicroBurst) | Azure enumeration and privesc scripts |
+| [Stormspotter](https://github.com/Azure/Stormspotter) | Azure attack-graph visualisation |
+| [MFASweep](https://github.com/dafthack/MFASweep) | MFA coverage gap discovery |
+| [MSOLSpray](https://github.com/dafthack/MSOLSpray) | Password spraying against Microsoft Online |
+| [Office365Hacker](https://github.com/YasserREED/Office365Hacker) | Office 365 attack tooling |
+| [OffensiveCloud](https://github.com/lutzenfried/OffensiveCloud) | Multi-cloud offensive references |
+| [ROADtoken gist](https://gist.github.com/xpn/f12b145dba16c2eebdd1c6829267b90c) | PRT cookie retrieval via browsercore |
 
 ---
 

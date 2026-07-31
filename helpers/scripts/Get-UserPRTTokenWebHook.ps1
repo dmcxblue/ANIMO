@@ -2,7 +2,7 @@ function Get-UserPRTToken {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [string]$WebhookUrl  # Example: http://192.168.1.61:8000/
+        [string]$WebhookUrl  # Example: http://<LISTENER_IP>:8000/
     )
 
     process {

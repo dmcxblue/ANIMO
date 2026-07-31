@@ -10,10 +10,11 @@
 #   2) If AnimoServer is not running, spawns it under gdb in batch mode with
 #      the passed CLI args. Any crash dumps full backtrace before gdb exits.
 #
-# Server args:
+# Server args (spawn mode only):
 #   Pass everything after `--` and it's forwarded verbatim to AnimoServer.
 #   Or set env: ANIMO_IP, ANIMO_PORT, ANIMO_PASSWORD.
-#   Defaults: -i 192.168.1.27 -p 50500 -P rt2025
+#   Defaults: -i 127.0.0.1 -p 7777. ANIMO_PASSWORD has no default - either
+#   export it or pass -P yourself after `--`.
 #
 # Output goes to:
 #   /tmp/animo-srv-gdb.log        (this script's snapshot / crash output)
@@ -32,10 +33,11 @@ REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 SERVER_BIN="$REPO_ROOT/build/server/AnimoServer"
 LOG="/tmp/animo-srv-gdb.log"
 
-# Defaults, overridable via env or CLI passthrough.
-IP="${ANIMO_IP:-192.168.1.27}"
-PORT="${ANIMO_PORT:-50500}"
-PASSWORD="${ANIMO_PASSWORD:-rt2025}"
+# Defaults, overridable via env or CLI passthrough. No password default on
+# purpose - it would end up committed and reused across engagements.
+IP="${ANIMO_IP:-127.0.0.1}"
+PORT="${ANIMO_PORT:-7777}"
+PASSWORD="${ANIMO_PASSWORD:-}"
 
 MODE="auto"
 PASSTHROUGH=()
@@ -48,11 +50,6 @@ while [[ $# -gt 0 ]]; do
         *)  PASSTHROUGH+=("$1"); shift ;;
     esac
 done
-
-# If nothing passed after `--`, build default arg list.
-if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
-    PASSTHROUGH=(-i "$IP" -p "$PORT" -P "$PASSWORD")
-fi
 
 require_gdb() {
     command -v gdb >/dev/null || { echo "gdb not on PATH"; exit 1; }
@@ -83,6 +80,16 @@ snapshot() {
 
 spawn_under_gdb() {
     [ -x "$SERVER_BIN" ] || { echo "Server binary not found: $SERVER_BIN"; exit 1; }
+    # Only spawn mode needs server args; snapshot mode attaches to a live process.
+    if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
+        if [ -z "$PASSWORD" ]; then
+            echo "No server password set. Either:" >&2
+            echo "  export ANIMO_PASSWORD=<pass>" >&2
+            echo "  or: $0 --spawn -- -i $IP -p $PORT -P <pass>" >&2
+            exit 1
+        fi
+        PASSTHROUGH=(-i "$IP" -p "$PORT" -P "$PASSWORD")
+    fi
     # Kill only the server matching our port; leave unrelated instances alone.
     local existing
     existing=$(find_running)
