@@ -1,4 +1,3 @@
-
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Azure%20%7C%20M365-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white" />
   <img src="https://img.shields.io/badge/C++-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white" />
@@ -16,7 +15,6 @@
 <p align="center">
   <b>Designed for authorized penetration testing, red team operations, and security research.</b>
 </p>
-
 ---
 
 ## What is ANIMO?
@@ -640,6 +638,12 @@ Users are responsible for:
 4. **Protecting** captured credentials and tokens during and after engagements
 
 **Unauthorized access to computer systems is illegal. The authors are not responsible for misuse of this tool.**
+
+---
+
+A small blog showing ANIMO usage.
+
+https://www.init1security.com/post/prt-tokens-from-initial-access-to-long-term-cloud-control
 
 ---
 
