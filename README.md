@@ -21,14 +21,14 @@
 
 ## What is ANIMO?
 
-ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines **PowerShell-based session management**, **Azure CLI parity**, and **native Graph / ARM API integration**. It gives red teamers a single interface to manage multiple Azure sessions, capture and manipulate tokens, enumerate cloud resources, and execute post-exploitation techniques during authorized engagements — with WhoAmI-driven autofill so Post-Exploit modules pre-populate from what you already know about the identity.
+ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines **PowerShell-based session management**, **Azure CLI parity**, and **native Graph / ARM API integration**. It gives red teamers a single interface to manage multiple Azure sessions, capture and manipulate tokens, enumerate cloud resources, and execute post-exploitation techniques during authorized engagements with WhoAmI-driven autofill so Post-Exploit modules pre-populate from what you already know about the identity.
 
 ### Highlights
 
 > - Manage **multiple Azure PowerShell + az cli sessions** simultaneously from one dashboard
 > - **Capture, exchange, mint, and analyze** OAuth tokens (access, refresh, PRT, SAS)
 > - Discovery: **WhoAmI** with derived Capability verdicts + fine-grained ARM action enumeration
-> - **Seamless autofill** — WhoAmI findings flow into Post-Exploitation modules with zero re-typing
+> - **Seamless autofill** WhoAmI findings flow into Post-Exploitation modules with zero re-typing
 > - Access **Outlook, Calendar, Teams, OneDrive, SharePoint, Storage, Key Vault** through Graph / ARM
 > - Enumerate **subscriptions, VMs, SQL, Function Apps, Logic Apps, Automation Runbooks** and more
 > - **Remote Exec** framework: pluggable transports for Azure VM runCommand, uploaded HTTP webshells, and SSTI payload injection (Jinja2 / Twig / Freemarker / Velocity / ERB)
@@ -60,7 +60,7 @@ ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines *
 | Qt6 | 6.2+ (Widgets, Network, WebEngineWidgets, Sql; plus the Svg image plugin for the app icon) |
 | CMake | 3.16+ |
 | PowerShell | 7.x (`pwsh`) |
-| Azure CLI | 2.x (`az`) — optional but recommended for parity |
+| Azure CLI | 2.x (`az`) optional but recommended for parity |
 | Python | 3.8+ with `msal`, `requests` |
 
 ### Install & Build (Linux)
@@ -105,7 +105,7 @@ cmake --build build
 
 Binaries land in `build\server\AnimoServer.exe` and `build\client\AnimoClient.exe`.
 The hardening flags in the top-level `CMakeLists.txt` are GCC/Clang-only and are
-skipped under MSVC. `build.sh` and `clean.sh` are bash scripts — use the CMake
+skipped under MSVC. `build.sh` and `clean.sh` are bash scripts use the CMake
 commands above, or run them from WSL2.
 
 ### Launch
@@ -166,7 +166,7 @@ Serves an OAuth consent page from a local listener, capturing the code exchange 
 </p>
 
 #### Webhook Token Capture
-Standalone HTTP listener that receives tokens posted by external implants (e.g. `GrabTokenAzureAD`, `Get-UserPRTToken`). Modes: capture all tokens / PRT-only / access-refresh-only — every captured token drops into the Token Log automatically.
+Standalone HTTP listener that receives tokens posted by external implants (e.g. `GrabTokenAzureAD`, `Get-UserPRTToken`). Modes: capture all tokens / PRT-only / access-refresh-only every captured token drops into the Token Log automatically.
 <!-- Add screenshot: screenshots/webhook-capture.png -->
 <p align="center">
   <img src="screenshots/webhook-capture.png" alt="Webhook Capture" width="800" />
@@ -239,7 +239,7 @@ Adds a new client secret (or certificate credential) to an Azure AD Application 
 
 Enumeration of directory objects, RBAC assignments, tenant policies, and cloud resources.
 
-#### WhoAmI (Entra / Azure) — flagship
+#### WhoAmI (Entra / Azure)
 Comprehensive read-only identity dump for the selected session: identity + JWT claims, groups, admin roles (active + PIM eligible), owned objects, Azure RBAC assignments across every accessible subscription, auth methods, licenses, OAuth grants, and token permissions. Includes a **Capabilities** tab with derived yes/no verdicts (register apps, run VM commands, reset passwords, grant admin consent, etc.) and a **fine-grained ARM actions** tree enumerated via `az role assignment list` + `az role definition list` that catches custom roles with `Microsoft.Authorization/roleAssignments/write` and similar. Publishes findings to `WhoAmiInsights` so downstream Post-Exploitation modules autofill their fields.
 <!-- Add screenshot: screenshots/whoami.png -->
 <p align="center">
@@ -324,7 +324,7 @@ Enumerates VMs across subscriptions, showing OS type, power state, and location.
 </p>
 
 #### Automation Runbooks
-Enumerates Azure Automation accounts and their runbooks. Displays runbook code and lets the operator inspect the execution history — useful for finding stored credentials or lateral-movement primitives.
+Enumerates Azure Automation accounts and their runbooks. Displays runbook code and lets the operator inspect the execution history useful for finding stored credentials or lateral-movement primitives.
 <!-- Add screenshot: screenshots/runbooks.png -->
 <p align="center">
   <img src="screenshots/runbooks.png" alt="Automation Runbooks" width="800" />
@@ -355,7 +355,7 @@ Enumerates Logic Apps and their workflow definitions. Workflow JSON often expose
 
 ### Collection (M365 Data Harvesting)
 
-Reads user data through Graph — the exfiltration surface.
+Reads user data through Graph the exfiltration surface.
 
 #### Outlook Email
 Full Outlook mailbox client: read / search / reply / forward / send / delete emails via Graph's `/messages` endpoints. Supports HTML compose with attachments and a preview pane that renders the message body safely.
@@ -365,7 +365,7 @@ Full Outlook mailbox client: read / search / reply / forward / send / delete ema
 </p>
 
 #### Outlook Calendar
-Read the user's calendar via Graph — meetings, attendees, dial-in info, attached files. Handy for identifying targets, meeting patterns, and confidential information embedded in invites.
+Read the user's calendar via Graph meetings, attendees, dial-in info, attached files. Handy for identifying targets, meeting patterns, and confidential information embedded in invites.
 <!-- Add screenshot: screenshots/outlook-calendar.png -->
 <p align="center">
   <img src="screenshots/outlook-calendar.png" alt="Outlook Calendar" width="800" />
@@ -379,7 +379,7 @@ Browses joined Teams and channels, reads chat conversations, and can send messag
 </p>
 
 #### SharePoint / OneDrive Files
-Tree-style file browser over `/drives/` — traverse OneDrive personal drives and SharePoint document libraries, download files, and preview content. Feeds directly into the exfiltration workflow.
+Tree-style file browser over `/drives/` traverse OneDrive personal drives and SharePoint document libraries, download files, and preview content. Feeds directly into the exfiltration workflow.
 <!-- Add screenshot: screenshots/sharepoint.png -->
 <p align="center">
   <img src="screenshots/sharepoint.png" alt="SharePoint / OneDrive" width="800" />
@@ -420,7 +420,7 @@ Injects authentication methods against a target user: **Temporary Access Pass** 
 </p>
 
 #### Fresh Device Join (DRS)
-Native implementation of the Entra Device Registration Service wire protocol — joins a fresh fake device to the tenant and receives back a signed X.509 device certificate. The cert survives password reset and is the modern-tradecraft equivalent of a golden ticket for cloud identities. Encrypted at rest under `data/device_certs.dat`.
+Native implementation of the Entra Device Registration Service wire protocol joins a fresh fake device to the tenant and receives back a signed X.509 device certificate. The cert survives password reset and is the modern-tradecraft equivalent of a golden ticket for cloud identities. Encrypted at rest under `data/device_certs.dat`.
 <!-- Add screenshot: screenshots/device-join.png -->
 <p align="center">
   <img src="screenshots/device-join.png" alt="Fresh Device Join" width="800" />
@@ -437,7 +437,7 @@ Registers a WHfB credential on the compromised account by running the AAD Intern
 
 ### Post-Exploitation
 
-Top-level tabbed window covering directory-side attack primitives. Fields **autofill from WhoAmI** — the Role Assignment tab's principal / subscription / scope populate from the last WhoAmI snapshot, and a "From WhoAmI" combo lists every RBAC scope the identity holds so the operator picks one instead of retyping.
+Top-level tabbed window covering directory-side attack primitives. Fields **autofill from WhoAmI** the Role Assignment tab's principal / subscription / scope populate from the last WhoAmI snapshot, and a "From WhoAmI" combo lists every RBAC scope the identity holds so the operator picks one instead of retyping.
 
 - **User Groups** — search users / groups, add users to security groups
 - **App Backdoors** — create backdoor Application registrations
@@ -455,7 +455,7 @@ Top-level tabbed window covering directory-side attack primitives. Fields **auto
 
 ### Remote Exec
 
-Interactive shell UI over a pluggable transport framework — the same "target → command → output" mental model whether the payload lands via Azure runCommand, an uploaded PHP webshell, or a SSTI injection point.
+Interactive shell UI over a pluggable transport framework the same "target → command → output" mental model whether the payload lands via Azure runCommand, an uploaded PHP webshell, or a SSTI injection point.
 
 - **Azure VM (runCommand)** — properly polls the ARM async operation; one-click "Grab MI Token from IMDS" for Managed Identity theft
 - **HTTP Webshell** — for uploaded `cmd.php`-style RCE; configurable output extractor (raw / regex / between markers)
@@ -513,10 +513,10 @@ Generates a professional HTML report summarising sessions, captured tokens, enum
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         AnimoClient                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │ Dashboard   │  │  Plugin     │  │ Direct API Calls        │ │
-│  │ (Sessions)  │  │  Windows    │  │ (Graph, ARM, Vault)     │ │
-│  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘ │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │ Dashboard   │  │  Plugin     │  │ Direct API Calls        │  │
+│  │ (Sessions)  │  │  Windows    │  │ (Graph, ARM, Vault)     │  │
+│  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘  │
 │         │                │                       │              │
 │         └────────────────┴───────────────────────┘              │
 │                          │                                      │
@@ -531,11 +531,11 @@ Generates a professional HTML report summarising sessions, captured tokens, enum
 │  │                    Request Dispatcher                      │ │
 │  └──────────┬─────────────────────────────────┬───────────────┘ │
 │             │                                 │                 │
-│  ┌──────────▼──────────┐         ┌───────────▼───────────┐     │
-│  │  PowerShellManager  │         │   SessionDBManager    │     │
-│  │  (Sessions: pwsh +  │         │   (SQLite Database)   │     │
-│  │   az cli contexts)  │         │                       │     │
-│  └─────────────────────┘         └───────────────────────┘     │
+│  ┌──────────▼──────────┐         ┌───────────▼───────────┐      │
+│  │  PowerShellManager  │         │   SessionDBManager    │      │
+│  │  (Sessions: pwsh +  │         │   (SQLite Database)   │      │
+│  │   az cli contexts)  │         │                       │      │
+│  └─────────────────────┘         └───────────────────────┘      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -569,7 +569,7 @@ AnimoServer [options]
 ### Required PowerShell Modules
 
 Installed by `Install-AllModules.ps1`. The script is additive — it never removes
-modules you already have — and skips Windows-only components on Linux and macOS
+modules you already have and skips Windows-only components on Linux and macOS
 with a message rather than failing.
 
 | Module | Purpose | Platform |
@@ -648,7 +648,7 @@ Users are responsible for:
 - [AADInternals](https://github.com/Gerenios/AADInternals) — Azure AD internals research
 - [ROADtools](https://github.com/dirkjanm/ROADtools) — Azure AD exploration toolkit
 - [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) — Microsoft Authentication Library
-- [GraphSpy](https://github.com/RedByte1337/GraphSpy) — inspiration for parts of the Discovery and Persistence design
+- [GraphSpy](https://github.com/RedByte1337/GraphSpy) — inspiration for parts of the Discovery and Persistence Design
 
 ---
 
