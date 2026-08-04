@@ -15,6 +15,7 @@
 <p align="center">
   <b>Designed for authorized penetration testing, red team operations, and security research.</b>
 </p>
+
 ---
 
 ## What is ANIMO?
