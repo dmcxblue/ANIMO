@@ -56,7 +56,7 @@ ANIMO is a comprehensive Azure AD / Entra ID assessment platform that combines *
 
 | Requirement | Version |
 |:------------|:--------|
-| OS | Linux (Kali recommended, build verified), macOS, or Windows — natively or via WSL2 |
+| OS | Linux (Kali recommended, build verified), macOS, or Windows  natively or via WSL2 |
 | Qt6 | 6.2+ (Widgets, Network, WebEngineWidgets, Sql; plus the Svg image plugin for the app icon) |
 | CMake | 3.16+ |
 | PowerShell | 7.x (`pwsh`) |
@@ -247,7 +247,7 @@ Comprehensive read-only identity dump for the selected session: identity + JWT c
 </p>
 
 #### Tenant Search (Files / Mail / Chat)
-Single `POST /v1.0/search/query` returns hits across OneDrive / SharePoint (`driveItem`), mail (`message`), Teams (`chatMessage`), calendar (`event`), and sites — the fastest way to hunt for credentials with keywords like `password | secret | vpn`. Results grouped by entity type; CSV / JSON export.
+Single `POST /v1.0/search/query` returns hits across OneDrive / SharePoint (`driveItem`), mail (`message`), Teams (`chatMessage`), calendar (`event`), and sites  the fastest way to hunt for credentials with keywords like `password | secret | vpn`. Results grouped by entity type; CSV / JSON export.
 <!-- Add screenshot: screenshots/tenant-search.png -->
 <p align="center">
   <img src="screenshots/tenant-search.png" alt="Tenant Search" width="800" />
@@ -289,14 +289,14 @@ Detects whether Azure AD Connect password-writeback is enabled and enumerates wh
 </p>
 
 #### OAuth Consent Grants
-Enumerates every consent grant (`oauth2PermissionGrants`) issued in the tenant, highlighting `AllPrincipals` grants and apps without a redirect-URI restriction — the primary consent-abuse discovery pane.
+Enumerates every consent grant (`oauth2PermissionGrants`) issued in the tenant, highlighting `AllPrincipals` grants and apps without a redirect-URI restriction  the primary consent-abuse discovery pane.
 <!-- Add screenshot: screenshots/oauth-consent.png -->
 <p align="center">
   <img src="screenshots/oauth-consent.png" alt="OAuth Consent Enumeration" width="800" />
 </p>
 
 #### Graph Query
-Raw Graph API request builder — pick GET / POST, paste a URL, optionally attach a JSON body, and hit send. Host-locked to `graph.microsoft.com` with automatic bearer-token attachment; the response renders with syntax highlighting.
+Raw Graph API request builder  pick GET / POST, paste a URL, optionally attach a JSON body, and hit send. Host-locked to `graph.microsoft.com` with automatic bearer-token attachment; the response renders with syntax highlighting.
 <!-- Add screenshot: screenshots/graph-query.png -->
 <p align="center">
   <img src="screenshots/graph-query.png" alt="Graph Query" width="800" />
@@ -317,7 +317,7 @@ Lists Azure SQL servers and databases; supports both AAD-authenticated and SQL-a
 </p>
 
 #### Virtual Machines
-Enumerates VMs across subscriptions, showing OS type, power state, and location. Includes a **Run Command** tab that dispatches PowerShell (Windows) or shell script (Linux) via ARM `runCommand` — properly polls the async operation URL so the output actually comes back.
+Enumerates VMs across subscriptions, showing OS type, power state, and location. Includes a **Run Command** tab that dispatches PowerShell (Windows) or shell script (Linux) via ARM `runCommand`  properly polls the async operation URL so the output actually comes back.
 <!-- Add screenshot: screenshots/vm-manager.png -->
 <p align="center">
   <img src="screenshots/vm-manager.png" alt="Azure VM Manager" width="800" />
@@ -338,7 +338,7 @@ Enumerates Service Principals AND Application Registrations, showing appId, serv
 </p>
 
 #### Function Apps
-Lists Function Apps across accessible subscriptions with their triggers, code (where readable), and app settings — a rich source of secrets and pivot points.
+Lists Function Apps across accessible subscriptions with their triggers, code (where readable), and app settings  a rich source of secrets and pivot points.
 <!-- Add screenshot: screenshots/function-apps.png -->
 <p align="center">
   <img src="screenshots/function-apps.png" alt="Function Apps" width="800" />
@@ -386,7 +386,7 @@ Tree-style file browser over `/drives/` traverse OneDrive personal drives and Sh
 </p>
 
 #### Storage Explorer
-Enumerates Azure Storage accounts and browses blob containers, file shares, tables, and queues. Supports both **bearer-token** (Connected Account) and **SAS token** authentication — paste a SAS query string and every list / download call uses it automatically.
+Enumerates Azure Storage accounts and browses blob containers, file shares, tables, and queues. Supports both **bearer-token** (Connected Account) and **SAS token** authentication  paste a SAS query string and every list / download call uses it automatically.
 <!-- Add screenshot: screenshots/storage-explorer.png -->
 <p align="center">
   <img src="screenshots/storage-explorer.png" alt="Storage Explorer" width="800" />
@@ -399,7 +399,7 @@ Enumerates Azure Storage accounts and browses blob containers, file shares, tabl
 Long-term footholds that survive password reset or session expiry.
 
 #### Email Inbox Rules
-Creates hidden Outlook inbox rules that forward / redirect / delete matching messages — the classic BEC persistence primitive. Supports keyword filters (`invoice | payment | wire`), stealth flags (hidden rule name, stop-processing-more-rules), and per-rule sequence ordering.
+Creates hidden Outlook inbox rules that forward / redirect / delete matching messages  the classic BEC persistence primitive. Supports keyword filters (`invoice | payment | wire`), stealth flags (hidden rule name, stop-processing-more-rules), and per-rule sequence ordering.
 <!-- Add screenshot: screenshots/email-rules.png -->
 <p align="center">
   <img src="screenshots/email-rules.png" alt="Email Inbox Rules" width="800" />
@@ -439,12 +439,12 @@ Registers a WHfB credential on the compromised account by running the AAD Intern
 
 Top-level tabbed window covering directory-side attack primitives. Fields **autofill from WhoAmI** the Role Assignment tab's principal / subscription / scope populate from the last WhoAmI snapshot, and a "From WhoAmI" combo lists every RBAC scope the identity holds so the operator picks one instead of retyping.
 
-- **User Groups** — search users / groups, add users to security groups
-- **App Backdoors** — create backdoor Application registrations
-- **Password Reset** — PATCH `/users/{id}` passwordProfile
-- **Role Assignment** — assign Azure RBAC roles at any scope; scope picker prefilled from WhoAmI
-- **Guest Invite** — B2B `POST /invitations` with silent-invite options
-- **SPN Enumeration** — search Service Principals + inspect credentials
+- **User Groups**  search users / groups, add users to security groups
+- **App Backdoors**  create backdoor Application registrations
+- **Password Reset**  PATCH `/users/{id}` passwordProfile
+- **Role Assignment**  assign Azure RBAC roles at any scope; scope picker prefilled from WhoAmI
+- **Guest Invite**  B2B `POST /invitations` with silent-invite options
+- **SPN Enumeration**  search Service Principals + inspect credentials
 
 <!-- Add screenshot: screenshots/post-exploit.png -->
 <p align="center">
@@ -457,10 +457,10 @@ Top-level tabbed window covering directory-side attack primitives. Fields **auto
 
 Interactive shell UI over a pluggable transport framework the same "target → command → output" mental model whether the payload lands via Azure runCommand, an uploaded PHP webshell, or a SSTI injection point.
 
-- **Azure VM (runCommand)** — properly polls the ARM async operation; one-click "Grab MI Token from IMDS" for Managed Identity theft
-- **HTTP Webshell** — for uploaded `cmd.php`-style RCE; configurable output extractor (raw / regex / between markers)
-- **HTTP SSTI** — payload templating with presets for Jinja2, Twig, Freemarker, Velocity, ERB, or custom
-- **Persistent target list** — saved targets survive restarts (encrypted at rest)
+- **Azure VM (runCommand)**  properly polls the ARM async operation; one-click "Grab MI Token from IMDS" for Managed Identity theft
+- **HTTP Webshell**  for uploaded `cmd.php`-style RCE; configurable output extractor (raw / regex / between markers)
+- **HTTP SSTI**  payload templating with presets for Jinja2, Twig, Freemarker, Velocity, ERB, or custom
+- **Persistent target list**  saved targets survive restarts (encrypted at rest)
 
 <!-- Add screenshot: screenshots/remote-exec.png -->
 <p align="center">
@@ -486,7 +486,7 @@ Consolidated event feed: session creations, session exits, token issuances, and 
 </p>
 
 #### Token Lifetime Analysis
-JWT decoder — paste any bearer / refresh token to see claims, expiry, audience, issuer, and scopes / roles broken down with syntax highlighting.
+JWT decoder  paste any bearer / refresh token to see claims, expiry, audience, issuer, and scopes / roles broken down with syntax highlighting.
 <!-- Add screenshot: screenshots/token-analysis.png -->
 <p align="center">
   <img src="screenshots/token-analysis.png" alt="Token Analysis" width="800" />
@@ -539,7 +539,7 @@ Generates a professional HTML report summarising sessions, captured tokens, enum
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Communication uses **line-delimited JSON over TCP** (default port 7777). Every login flow logs into **both** Az PowerShell (`Connect-AzAccount`) **and** Azure CLI (`az login`) so the session terminal is fully usable from either toolchain — `az account get-access-token --resource X` and `Get-AzAccessToken -ResourceUrl X` both work out of the box.
+Communication uses **line-delimited JSON over TCP** (default port 7777). Every login flow logs into **both** Az PowerShell (`Connect-AzAccount`) **and** Azure CLI (`az login`) so the session terminal is fully usable from either toolchain  `az account get-access-token --resource X` and `Get-AzAccessToken -ResourceUrl X` both work out of the box.
 
 ---
 
@@ -568,7 +568,7 @@ AnimoServer [options]
 
 ### Required PowerShell Modules
 
-Installed by `Install-AllModules.ps1`. The script is additive — it never removes
+Installed by `Install-AllModules.ps1`. The script is additive  it never removes
 modules you already have and skips Windows-only components on Linux and macOS
 with a message rather than failing.
 
@@ -583,7 +583,7 @@ with a message rather than failing.
 | `AzTable` | Azure Table Storage | Any |
 | `AzureAD` | Azure Active Directory (legacy) | **Windows only** |
 
-`AzureAD` targets .NET Framework and cannot be imported by PowerShell 7 — use
+`AzureAD` targets .NET Framework and cannot be imported by PowerShell 7  use
 Windows PowerShell 5.1, or `Import-Module AzureAD -UseWindowsPowerShell` from
 pwsh 7 on Windows. On Linux the `Get-AzureAD*` terminal autocompletions remain
 available but the cmdlets will not resolve; every ANIMO panel has an Az or Graph
@@ -620,8 +620,8 @@ mkdir -p ~/tools && cd ~/tools
 ## Security & OPSEC
 
 - **Transport**: Use SSH tunnels or VPN for client-server communication over untrusted networks
-- **Server Password**: Transmitted in cleartext over TCP — use strong passwords
-- **Token Storage**: Captured tokens are stored in SQLite — protect the `data/` directory
+- **Server Password**: Transmitted in cleartext over TCP use strong passwords
+- **Token Storage**: Captured tokens are stored in SQLite protect the `data/` directory
 - **Device Certs**: DRS-joined device private keys are AES-256-GCM encrypted at rest under `data/device_certs.dat`
 - **Cleanup**: Always run `./clean.sh` (or delete the `data/` directory) after an engagement
 - **Token Lifetimes**: Access tokens expire in ~1 hour; refresh tokens last up to 90 days unless revoked
@@ -645,13 +645,13 @@ Users are responsible for:
 
 ## Acknowledgments
 
-- [AADInternals](https://github.com/Gerenios/AADInternals) — Azure AD internals research
-- [ROADtools](https://github.com/dirkjanm/ROADtools) — Azure AD exploration toolkit
-- [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) — Microsoft Authentication Library
-- [GraphSpy](https://github.com/RedByte1337/GraphSpy) — inspiration for parts of the Discovery and Persistence Design
+- [AADInternals](https://github.com/Gerenios/AADInternals) Azure AD internals research
+- [ROADtools](https://github.com/dirkjanm/ROADtools) Azure AD exploration toolkit
+- [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) Microsoft Authentication Library
+- [GraphSpy](https://github.com/RedByte1337/GraphSpy) Inspiration for parts of the Discovery and Persistence Design
 
 ---
 
 <p align="center">
-  <b>ANIMO</b> — <i>Azure Network Intel & Mission Ops</i>
+  <b>ANIMO</b> <i>Azure Network Intel & Mission Ops</i>
 </p>
