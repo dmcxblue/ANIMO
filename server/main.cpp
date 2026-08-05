@@ -59,9 +59,22 @@ int main(int argc, char *argv[]) {
     QCommandLineOption passwordOption(QStringList() << "P" << "password",
         "Password required for clients to connect (default: empty)", "password", "");
 
+    // TLS is mandatory. A self-signed pair is generated on first start unless
+    // custom material is supplied here.
+    const QString defaultTlsDir = QCoreApplication::applicationDirPath() + "/data/tls";
+    QCommandLineOption tlsCertOption(QStringList() << "tls-cert",
+        "PEM certificate for the client channel (default: <appdir>/data/tls/server.crt, "
+        "self-signed and generated on first start)",
+        "path", defaultTlsDir + "/server.crt");
+    QCommandLineOption tlsKeyOption(QStringList() << "tls-key",
+        "PEM private key for the client channel (default: <appdir>/data/tls/server.key)",
+        "path", defaultTlsDir + "/server.key");
+
     parser.addOption(ipOption);
     parser.addOption(portOption);
     parser.addOption(passwordOption);
+    parser.addOption(tlsCertOption);
+    parser.addOption(tlsKeyOption);
 
     parser.process(app);
 
@@ -75,6 +88,13 @@ int main(int argc, char *argv[]) {
 
     // Only password matters, user can be anything
     Server server(ip, port, QString(), password);
+    server.setTlsPaths(parser.value(tlsCertOption), parser.value(tlsKeyOption));
+
+    // Server::log had no consumer, so status lines - including the TLS
+    // fingerprint operators must verify - never reached the console.
+    QObject::connect(&server, &Server::log, &app, [](const QString &line) {
+        qInfo().noquote() << line;
+    });
 
     if (!server.start()) {
         qCritical() << "Failed to start server.";

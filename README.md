@@ -119,6 +119,19 @@ commands above, or run them from WSL2.
 
 Connect to the server using the client login window with your server IP, port, and password.
 
+**The client/server channel is TLS-only.** On first start the server generates its own
+self-signed certificate under `data/tls/` and prints a SHA-256 fingerprint:
+
+```
+[+] Listening on 0.0.0.0:7777 (TLS)
+[+] Certificate SHA-256 pin: 19:CA:42:09:...:6F:DD
+```
+
+The first time the client connects it shows that fingerprint and asks you to confirm it. Check
+it against the server console, accept, and it is pinned for that host:port  later connections
+go through silently. If the fingerprint ever changes, the client refuses to connect and asks
+again. Use `--tls-cert` / `--tls-key` to supply your own certificate instead.
+
 ---
 
 ## Modules
@@ -538,7 +551,8 @@ Generates a professional HTML report summarising sessions, captured tokens, enum
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Communication uses **line-delimited JSON over TCP** (default port 7777). Every login flow logs into **both** Az PowerShell (`Connect-AzAccount`) **and** Azure CLI (`az login`) so the session terminal is fully usable from either toolchain  `az account get-access-token --resource X` and `Get-AzAccessToken -ResourceUrl X` both work out of the box.
+Communication uses **line-delimited JSON over TLS 1.2+** (default port 7777), with the server
+authenticated by certificate fingerprint pin. Every login flow logs into **both** Az PowerShell (`Connect-AzAccount`) **and** Azure CLI (`az login`) so the session terminal is fully usable from either toolchain  `az account get-access-token --resource X` and `Get-AzAccessToken -ResourceUrl X` both work out of the box.
 
 ---
 
@@ -559,11 +573,18 @@ Communication uses **line-delimited JSON over TCP** (default port 7777). Every l
 
 ```
 AnimoServer [options]
-  -i, --ip <address>      Listen IP (default: 127.0.0.1)
+  -i, --ip <address>      Listen IP (default: 0.0.0.0)
   -p, --port <port>       Listen port (default: 7777)
-  -P, --password <pass>   Client authentication password (required)
-  -d, --data <path>       Data directory (default: ./data)
+  -P, --password <pass>   Client authentication password
+  --tls-cert <path>       PEM certificate (default: <appdir>/data/tls/server.crt,
+                          self-signed and generated on first start)
+  --tls-key <path>        PEM private key  (default: <appdir>/data/tls/server.key)
 ```
+
+TLS cannot be turned off  there is no plaintext listener. The private key must be an
+unencrypted PEM readable only by its owner (`chmod 600`) or the server refuses to start. To
+roll the generated certificate, delete both files in `data/tls/` and restart; every operator
+will be prompted to confirm the new fingerprint.
 
 ### Required PowerShell Modules
 

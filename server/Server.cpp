@@ -3,7 +3,12 @@
 #include "../shared/OutputSanitizer.h"
 #include "../shared/PowerShellManager.h"
 #include "../shared/Config.h"
+#include "../shared/TransportTls.h"
 #include "SessionDBManager.h"
+
+#include <QSslCipher>
+#include <QSslKey>
+#include <QSslSocket>
 
 
 #include <QJsonDocument>
@@ -784,12 +789,58 @@ bool Server::start() {
     if (!SessionDBManager::instance().initMainDB()) {
         emit log("[-] Sessions DB init failed (continuing with volatile memory only).");
     }
-    connect(&tcp_, &QTcpServer::newConnection, this, &Server::onNewConnection);
+
+    if (!initTls())
+        return false;
+
+    tcp_.onDescriptor = [this](qintptr fd) { onIncomingDescriptor(fd); };
+
     if (!tcp_.listen(QHostAddress(bindIp_), port_)) {
         emit log(QString("[-] Failed to listen on %1:%2").arg(bindIp_).arg(port_));
         return false;
     }
-    emit log(QString("[+] Listening on %1:%2").arg(bindIp_).arg(port_));
+    emit log(QString("[+] Listening on %1:%2 (TLS)").arg(bindIp_).arg(port_));
+    emit log(QString("[+] Certificate SHA-256 pin: %1").arg(tlsFingerprint_));
+    emit log("[*] Operators must confirm this fingerprint when connecting.");
+    return true;
+}
+
+void Server::setTlsPaths(const QString &certPath, const QString &keyPath) {
+    tlsCertPath_ = certPath;
+    tlsKeyPath_  = keyPath;
+}
+
+bool Server::initTls() {
+    if (!QSslSocket::supportsSsl()) {
+        emit log("[-] This Qt build has no SSL support (" +
+                 QSslSocket::sslLibraryBuildVersionString() + ") - cannot enable TLS.");
+        return false;
+    }
+
+    // Bind address gets its own SAN so operators connecting by IP do not even
+    // hit a hostname mismatch; the pin is what actually authenticates.
+    QStringList sans;
+    if (!bindIp_.isEmpty() && bindIp_ != QLatin1String("0.0.0.0") &&
+        bindIp_ != QLatin1String("::"))
+        sans << QString("IP:%1").arg(bindIp_);
+
+    QString err;
+    const bool existed = QFileInfo::exists(tlsCertPath_) && QFileInfo::exists(tlsKeyPath_);
+    if (!TransportTls::ensureServerMaterial(tlsCertPath_, tlsKeyPath_, sans, &err)) {
+        emit log(QString("[-] TLS material unavailable: %1").arg(err));
+        return false;
+    }
+    if (!existed)
+        emit log(QString("[+] Generated self-signed certificate: %1").arg(tlsCertPath_));
+
+    TransportTls::Material material;
+    if (!TransportTls::loadServerMaterial(tlsCertPath_, tlsKeyPath_, &material, &err)) {
+        emit log(QString("[-] TLS material rejected: %1").arg(err));
+        return false;
+    }
+
+    tlsConfig_      = TransportTls::serverConfiguration(material);
+    tlsFingerprint_ = TransportTls::fingerprintSha256(material.cert);
     return true;
 }
 
@@ -798,16 +849,75 @@ void Server::setLoginCredential(const QString &user, const QString &pass) {
     allowedPass_ = pass;
 }
 
-void Server::onNewConnection() {
-    while (tcp_.hasPendingConnections()) {
-        QTcpSocket *s = tcp_.nextPendingConnection();
-        clients_.insert(s);
-        emit log(QString("[*] Client connected: %1:%2")
-                     .arg(s->peerAddress().toString())
-                     .arg(s->peerPort()));
-        connect(s, &QTcpSocket::readyRead,     this, &Server::onClientReady);
-        connect(s, &QTcpSocket::disconnected,  this, &Server::onClientDisconnected);
+void Server::onIncomingDescriptor(qintptr socketDescriptor) {
+    QSslSocket *s = new QSslSocket(this);
+    if (!s->setSocketDescriptor(socketDescriptor)) {
+        s->deleteLater();
+        return;
     }
+    s->setSslConfiguration(tlsConfig_);
+
+    const QString peer = QString("%1:%2").arg(s->peerAddress().toString()).arg(s->peerPort());
+
+    // A peer that connects and then stalls must not hold the slot forever.
+    QTimer *handshakeTimer = new QTimer(s);
+    handshakeTimer->setSingleShot(true);
+    connect(handshakeTimer, &QTimer::timeout, this, [this, s, peer]() {
+        emit log(QString("[-] TLS handshake timed out: %1").arg(peer));
+        s->abort();
+        s->deleteLater();
+    });
+    handshakeTimer->start(TransportTls::handshakeTimeoutMs());
+
+    // Only an encrypted socket is wired into the protocol handlers, so no
+    // application byte is ever read before the handshake completes.
+    connect(s, &QSslSocket::encrypted, this, [this, s, handshakeTimer]() {
+        handshakeTimer->stop();
+        registerClient(s);
+    });
+
+    // Server-side verification is off in Phase 1, so any sslErrors here is a
+    // real fault. Never ignore them.
+    connect(s, &QSslSocket::sslErrors, this,
+            [this, peer](const QList<QSslError> &errors) {
+        for (const QSslError &e : errors)
+            emit log(QString("[-] TLS error from %1: %2").arg(peer, e.errorString()));
+    });
+
+    connect(s, &QSslSocket::errorOccurred, this,
+            [this, s, peer](QAbstractSocket::SocketError) {
+        if (!s->isEncrypted()) {
+            // Typically a plaintext client talking to a TLS listener.
+            emit log(QString("[-] Handshake failed from %1: %2").arg(peer, s->errorString()));
+            s->abort();
+            s->deleteLater();
+        }
+    });
+
+    connect(s, &QSslSocket::disconnected, this, &Server::onClientDisconnected);
+
+    s->startServerEncryption();
+}
+
+void Server::registerClient(QTcpSocket *s) {
+    if (clients_.contains(s)) return;
+    clients_.insert(s);
+
+    QString detail = QString("%1:%2").arg(s->peerAddress().toString()).arg(s->peerPort());
+    if (auto *ssl = qobject_cast<QSslSocket *>(s)) {
+        QString proto;
+        switch (ssl->sessionProtocol()) {
+        case QSsl::TlsV1_2: proto = QStringLiteral("TLSv1.2"); break;
+        case QSsl::TlsV1_3: proto = QStringLiteral("TLSv1.3"); break;
+        default:            proto = QStringLiteral("TLS");     break;
+        }
+        detail += QString(" [%1 %2]").arg(proto, ssl->sessionCipher().name());
+    }
+
+    emit log(QString("[*] Client connected: %1").arg(detail));
+
+    // The disconnect handler is already wired at accept time.
+    connect(s, &QTcpSocket::readyRead, this, &Server::onClientReady);
 }
 
 void Server::onClientReady() {
@@ -829,12 +939,16 @@ void Server::onClientDisconnected() {
         for (auto it = g_subscribers.begin(); it != g_subscribers.end(); ++it)
             it.value().remove(s);
     }
-    clients_.remove(s);
+    // A peer that never got past the TLS handshake was never registered; its
+    // failure is already logged, so stay quiet here.
+    const bool wasRegistered = clients_.remove(s);
     authed_.remove(s);
     const QString op = operatorBySocket_.take(s);
     s->deleteLater();
-    emit log(op.isEmpty() ? QStringLiteral("[*] Client disconnected")
-                          : QString("[*] Operator '%1' disconnected").arg(op));
+    if (wasRegistered) {
+        emit log(op.isEmpty() ? QStringLiteral("[*] Client disconnected")
+                              : QString("[*] Operator '%1' disconnected").arg(op));
+    }
 }
 
 bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {

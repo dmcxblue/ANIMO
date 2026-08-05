@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QScreen>
 #include <QFile>
 #include <QDateTime>
@@ -124,10 +125,56 @@ int main(int argc, char *argv[])
 
     DashboardWindow *dashboard = nullptr;
 
+    // Trust-on-first-use prompt. Deliberately out of band: the handshake is
+    // allowed to fail first, then the operator decides, then we retry. Putting
+    // a modal dialog inside the sslErrors callback would nest it inside the
+    // blocking event loop connectAndLogin already runs.
+    auto confirmCertificate = [&](const QString &ip, quint16 port) -> bool {
+        const bool mismatch =
+            transport->lastTlsStatus() == ClientTransport::TlsStatus::PinMismatch;
+
+        QMessageBox box(&loginWin);
+        box.setIcon(mismatch ? QMessageBox::Critical : QMessageBox::Warning);
+        box.setWindowTitle(mismatch ? "Server Certificate Changed"
+                                    : "Unrecognised Server Certificate");
+        box.setText(mismatch
+            ? QString("The certificate presented by %1:%2 does not match the one "
+                      "you trusted before.\n\nThis happens after a legitimate "
+                      "certificate rotation - or when someone is intercepting "
+                      "the channel.").arg(ip).arg(port)
+            : QString("You have not connected to %1:%2 before.\n\nConfirm the "
+                      "fingerprint against the one the server printed at startup.")
+                      .arg(ip).arg(port));
+        box.setInformativeText(
+            QString("Fingerprint (SHA-256):\n%1\n\nSubject: %2\nValid: %3")
+                .arg(transport->presentedFingerprint(),
+                     transport->presentedSubject(),
+                     transport->presentedValidity()));
+
+        QPushButton *trustBtn = box.addButton(mismatch ? "Trust New Certificate"
+                                                       : "Trust and Connect",
+                                              QMessageBox::AcceptRole);
+        QPushButton *cancelBtn = box.addButton("Cancel", QMessageBox::RejectRole);
+        box.setDefaultButton(cancelBtn); // Enter must not trust a certificate
+        box.exec();
+        return box.clickedButton() == trustBtn;
+    };
+
     QObject::connect(&loginWin, &ServerLoginWindow::connectToServer,
                      [&](const QString &ip, quint16 port, const QString &username, const QString &password) {
         // Connect + authenticate (uses your ClientTransport helper)
-        const bool ok = transport->connectAndLogin(ip, port, username, password, /*timeoutMs=*/5000);
+        bool ok = transport->connectAndLogin(ip, port, username, password, /*timeoutMs=*/5000);
+
+        // Untrusted certificate: ask, pin, retry once.
+        const ClientTransport::TlsStatus tls = transport->lastTlsStatus();
+        if (!ok && (tls == ClientTransport::TlsStatus::PinUnknown ||
+                    tls == ClientTransport::TlsStatus::PinMismatch)) {
+            if (confirmCertificate(ip, port)) {
+                transport->trustPresentedCertificate();
+                ok = transport->connectAndLogin(ip, port, username, password, /*timeoutMs=*/5000);
+            }
+        }
+
         if (ok) {
             loginWin.close();
 
@@ -152,6 +199,14 @@ int main(int argc, char *argv[])
             // Token Log so plugin-window UserSelectorWidgets aren't limited
             // to just currently-active PowerShell sessions.
             bootstrapTokenStore(transport, dashboard);
+        } else if (transport->lastTlsStatus() != ClientTransport::TlsStatus::Ok) {
+            // Never blame the password for a transport/trust failure.
+            QMessageBox::critical(&loginWin, "Secure Connection Failed",
+                                  transport->lastTlsError().isEmpty()
+                                      ? QString("Could not establish a TLS connection to %1:%2.\n"
+                                                "Check that the address and port are correct and "
+                                                "that the ANIMO server is running.").arg(ip).arg(port)
+                                      : transport->lastTlsError());
         } else {
             QMessageBox::critical(&loginWin, "Connection Failed",
                                   "Unable to authenticate with server.\nCheck IP, port, or password.");
