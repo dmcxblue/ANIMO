@@ -88,6 +88,18 @@ if ($r.status -ne 'success') {
     return
 }
 
+# Emit token markers up-front, before Az PS bootstrap. The tokens are already
+# valid at this point (MSAL succeeded + az cli cache is written); even if the
+# Az PS Connect-AzAccount step later fails, the client should still receive
+# the AT / RT / FOCI-minted resource tokens so the plugin windows work.
+Write-Output "[Animo] Access Token ($Resource):"
+Write-Output $r.access_token
+Write-Output "__ANIMO_TOKEN__:$($r.access_token)"
+if ($r.refresh_token)  { Write-Output "__ANIMO_REFRESH__:$($r.refresh_token)" }
+if ($r.graph_token)    { Write-Output "__ANIMO_TOKEN_GRAPH__:$($r.graph_token)" }
+if ($r.keyvault_token) { Write-Output "__ANIMO_TOKEN_KV__:$($r.keyvault_token)" }
+if ($r.storage_token)  { Write-Output "__ANIMO_TOKEN_STORAGE__:$($r.storage_token)" }
+
 # Confirm az cli sees the account (the helper wrote its MSAL cache + azureProfile.json).
 try {
     if (Get-Command az -EA SilentlyContinue) {
@@ -131,13 +143,17 @@ try {
         Write-Output "[Animo] Az PowerShell logged in as $($r.upn) (tenant $($r.tenant_id))"
         if ($r.graph_token)    { Write-Output "[Animo] Graph AT pre-loaded (Connect-MgGraph -AccessToken ...)" }
         if ($r.keyvault_token) { Write-Output "[Animo] Key Vault AT pre-loaded (Get-AzKeyVaultSecret works)" }
-        Write-Output "[Animo] Access Token ($Resource):"
-        Write-Output $r.access_token
-        Write-Output "__ANIMO_TOKEN__:$($r.access_token)"
         Write-Output "__ANIMO_LOGIN_OK__:$($r.upn)"
     } else {
-        Write-Output "__ANIMO_LOGIN_FAIL__:Az PS Connect-AzAccount produced no context"
+        # Tokens are already emitted above; treat this as a partial-success -
+        # the client still gets a usable session (plugin windows work), just
+        # without an Az PS context in the terminal.
+        Write-Output "[Animo] WARNING: Az PowerShell Connect-AzAccount returned no context - terminal Az cmdlets unavailable, plugin windows still work."
+        Write-Output "__ANIMO_LOGIN_OK__:$($r.upn)"
     }
 } catch {
-    Write-Output "__ANIMO_LOGIN_FAIL__:Az PS bootstrap failed: $($_.Exception.Message)"
+    # Same rationale as above - don't nuke a successful MSAL login just because
+    # Connect-AzAccount had a wobble.
+    Write-Output "[Animo] WARNING: Az PowerShell bootstrap failed ($($_.Exception.Message)) - terminal Az cmdlets unavailable, plugin windows still work."
+    Write-Output "__ANIMO_LOGIN_OK__:$($r.upn)"
 }

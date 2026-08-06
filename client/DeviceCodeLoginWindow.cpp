@@ -496,17 +496,41 @@ void DeviceCodeLoginWindow::wireTransport() {
                         // In full-session mode the token is minted server-side and
                         // arrives on the event; otherwise use the client-captured token.
                         const QString evToken = obj.value("accessToken").toString();
-                        const QString useToken = fullSessionMode ? evToken : pendingAccessToken;
+                        const QString evRefresh = obj.value("refreshToken").toString();
+                        // FOCI-minted per-resource tokens (device-code full-session only).
+                        const QString evKvToken      = obj.value("keyVaultToken").toString();
+                        const QString evGraphToken   = obj.value("graphToken").toString();
+                        const QString evStorageToken = obj.value("storageToken").toString();
 
-                        // Store token in TokenStore for the new session
+                        const QString useToken   = fullSessionMode ? evToken   : pendingAccessToken;
+                        const QString useRefresh = fullSessionMode ? evRefresh : pendingRefreshToken;
+
+                        // Primary token entry (audience matches session resource).
                         TokenInfo tokenInfo;
                         tokenInfo.accessToken = useToken;
-                        tokenInfo.refreshToken = pendingRefreshToken;
+                        tokenInfo.refreshToken = useRefresh;
                         tokenInfo.resource = fullSessionMode ? res : pendingResource;
                         // Snapshot RT before the pending state is cleared below - the
                         // Session Created dialog wants to display it.
-                        const QString rtForDisplay = pendingRefreshToken;
+                        const QString rtForDisplay = useRefresh;
                         TokenStore::instance()->storeToken(sid, tokenInfo);
+
+                        // Additional per-resource entries so KV Explorer / Storage /
+                        // Graph plugin windows find them via getTokenForSessionAndResource
+                        // without needing to mint from the RT.
+                        auto storeExtra = [sid, useRefresh](const QString &at, const QString &resource) {
+                            if (at.isEmpty()) return;
+                            TokenInfo ti;
+                            ti.accessToken  = at;
+                            ti.refreshToken = useRefresh;   // same RT (FOCI family) - lets ensureXToken refresh later
+                            ti.resource     = resource;
+                            TokenStore::instance()->storeToken(sid, ti);
+                        };
+                        if (fullSessionMode) {
+                            storeExtra(evKvToken,      QStringLiteral("https://vault.azure.net"));
+                            storeExtra(evGraphToken,   QStringLiteral("https://graph.microsoft.com"));
+                            storeExtra(evStorageToken, QStringLiteral("https://storage.azure.com"));
+                        }
 
                         // Update dashboard
                         if (parentDashboard) {
@@ -514,7 +538,7 @@ void DeviceCodeLoginWindow::wireTransport() {
                             parentDashboard->logEvent(
                                 QString("[+] Session created from device code for %1 (ID: %2)").arg(user, sid));
                             parentDashboard->setSessionTokenExpiry(sid, useToken,
-                                pendingRefreshToken, tokenInfo.resource, tenantId);
+                                useRefresh, tokenInfo.resource, tenantId);
                         }
 
                         // Clear pending state

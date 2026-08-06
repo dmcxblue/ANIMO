@@ -54,6 +54,14 @@ static QHash<QString, QByteArray>        g_stdoutBuf;     // sessionId -> aggreg
 static QHash<QString, QJsonObject>       g_sessionInfo;   // sessionId -> {user, tenantId, domain, resource}
 static QHash<QString, QString>           g_loginRid;      // sessionId -> rid (to echo back on login)
 static QHash<QString, QString>           g_pendingToken;  // sessionId -> access token (captured from PS before login OK)
+// Optional per-audience tokens captured alongside the primary ARM AT. Populated by
+// login scripts that pre-mint FOCI tokens (currently: device-code MSAL flow) and
+// forwarded to the client on session_created so plugin windows can use them
+// without re-minting from the RT.
+static QHash<QString, QString>           g_pendingRefresh;  // sessionId -> refresh token
+static QHash<QString, QString>           g_pendingKvToken;  // sessionId -> Key Vault AT
+static QHash<QString, QString>           g_pendingGraphToken;   // sessionId -> Microsoft Graph AT
+static QHash<QString, QString>           g_pendingStorageToken; // sessionId -> Azure Storage AT
 static QHash<QString, QString>           g_lastCommand;   // sessionId -> last command (for history)
 
 // Command execution state (one active command per session; the rest queued)
@@ -563,23 +571,35 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId,
             bufStr.remove(escapeRe);
             buf = bufStr.toUtf8();
 
-            // Capture access token emitted by SPN (or other) scripts before OK marker
-            static const QByteArray TOKEN_MARKER = "__ANIMO_TOKEN__:";
-            {
-                int tIdx = buf.indexOf(TOKEN_MARKER);
-                if (tIdx >= 0 && (tIdx == 0 || buf.at(tIdx - 1) == '\n')) {
-                    const int tStart = tIdx + TOKEN_MARKER.size();
-                    const int tNl = buf.indexOf('\n', tStart);
-                    const QByteArray tokenBA = (tNl >= 0) ? buf.mid(tStart, tNl - tStart) : buf.mid(tStart);
-                    QString token = QString::fromUtf8(tokenBA).trimmed();
-                    if (!token.isEmpty()) {
-                        g_pendingToken.insert(sessionId, token);
-                    }
-                    // consume the marker line
-                    if (tNl >= 0) buf.remove(tIdx, tNl - tIdx + 1);
-                    else buf.remove(tIdx, tokenBA.size() + TOKEN_MARKER.size());
-                }
-            }
+            // Capture tokens emitted by login scripts before the OK marker. Each
+            // marker is exactly one line: __ANIMO_<KIND>__:<value>\n. We scan for
+            // each independently so a script can emit any subset in any order.
+            auto captureTokenMarker = [&buf](const QByteArray &marker,
+                                             QHash<QString, QString> &sink,
+                                             const QString &sessionId) {
+                int idx = buf.indexOf(marker);
+                if (idx < 0 || (idx != 0 && buf.at(idx - 1) != '\n')) return;
+                const int start = idx + marker.size();
+                const int nl = buf.indexOf('\n', start);
+                const QByteArray bodyBA = (nl >= 0) ? buf.mid(start, nl - start) : buf.mid(start);
+                const QString value = QString::fromUtf8(bodyBA).trimmed();
+                if (!value.isEmpty()) sink.insert(sessionId, value);
+                // consume the marker line
+                if (nl >= 0) buf.remove(idx, nl - idx + 1);
+                else buf.remove(idx, bodyBA.size() + marker.size());
+            };
+
+            static const QByteArray TOKEN_MARKER         = "__ANIMO_TOKEN__:";          // primary AT (ARM)
+            static const QByteArray REFRESH_MARKER       = "__ANIMO_REFRESH__:";        // refresh token
+            static const QByteArray TOKEN_KV_MARKER      = "__ANIMO_TOKEN_KV__:";       // Key Vault AT
+            static const QByteArray TOKEN_GRAPH_MARKER   = "__ANIMO_TOKEN_GRAPH__:";    // Microsoft Graph AT
+            static const QByteArray TOKEN_STORAGE_MARKER = "__ANIMO_TOKEN_STORAGE__:";  // Azure Storage AT
+
+            captureTokenMarker(TOKEN_MARKER,         g_pendingToken,        sessionId);
+            captureTokenMarker(REFRESH_MARKER,       g_pendingRefresh,      sessionId);
+            captureTokenMarker(TOKEN_KV_MARKER,      g_pendingKvToken,      sessionId);
+            captureTokenMarker(TOKEN_GRAPH_MARKER,   g_pendingGraphToken,   sessionId);
+            captureTokenMarker(TOKEN_STORAGE_MARKER, g_pendingStorageToken, sessionId);
 
             // Check for MFA required marker first
             const int mfaIdx = buf.indexOf(MFA_MARKER);
@@ -673,9 +693,24 @@ static QProcess* ensureProcess(QObject *parent, const QString &sessionId,
                 };
                 if (g_loginRid.contains(sessionId)) ev.insert("rid", g_loginRid.take(sessionId));
                 if (g_pendingToken.contains(sessionId)) ev.insert("accessToken", g_pendingToken.take(sessionId));
-                // Forward storage token acquired via refresh exchange (MSAL sessions)
-                const QString stToken = meta.value("storageToken").toString();
-                if (!stToken.isEmpty()) ev.insert("storageToken", stToken);
+                // Forward the refresh token + FOCI-minted resource ATs so plugin
+                // windows (KV Explorer, Storage, Graph) find them in TokenStore via
+                // getTokenForSessionAndResource without needing to re-mint from RT.
+                if (g_pendingRefresh.contains(sessionId))
+                    ev.insert("refreshToken", g_pendingRefresh.take(sessionId));
+                if (g_pendingKvToken.contains(sessionId))
+                    ev.insert("keyVaultToken", g_pendingKvToken.take(sessionId));
+                if (g_pendingGraphToken.contains(sessionId))
+                    ev.insert("graphToken", g_pendingGraphToken.take(sessionId));
+                // Storage token may also come from the meta path (MSAL client-side
+                // token-mode sessions set g_sessionInfo["storageToken"]). Prefer the
+                // freshly-captured marker; fall back to meta.
+                if (g_pendingStorageToken.contains(sessionId)) {
+                    ev.insert("storageToken", g_pendingStorageToken.take(sessionId));
+                } else {
+                    const QString stToken = meta.value("storageToken").toString();
+                    if (!stToken.isEmpty()) ev.insert("storageToken", stToken);
+                }
 
                 qInfo() << "[Server] ✓ Session created:" << sessionId << "| User:" << upn << "| Method: Credentials";
                 broadcastToSession(sessionId, ev);
@@ -1819,6 +1854,10 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             g_activeCmdId.remove(sid);
             g_cmdStartTime.remove(sid);
             g_pendingToken.remove(sid);
+            g_pendingRefresh.remove(sid);
+            g_pendingKvToken.remove(sid);
+            g_pendingGraphToken.remove(sid);
+            g_pendingStorageToken.remove(sid);
             g_pendingReinject.remove(sid);
             g_earlyOutput.remove(sid);
             g_cmdQueue.remove(sid);
