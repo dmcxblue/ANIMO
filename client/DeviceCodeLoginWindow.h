@@ -1,6 +1,7 @@
 #pragma once
 #include <QWidget>
 #include <QLineEdit>
+#include <QComboBox>
 #include <QVBoxLayout>
 #include <QTextBrowser>
 #include <QPushButton>
@@ -21,7 +22,7 @@ private slots:
 
 private:
     DashboardWindow *parentDashboard;
-    QLineEdit *clientId;
+    QComboBox *clientId;               // editable combo: curated FOCI IDs + free-text
     QLineEdit *resourceInput;
     QLineEdit *additionalScopesInput;
     QLineEdit *uaInput;

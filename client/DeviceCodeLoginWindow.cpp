@@ -18,6 +18,7 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <QMessageBox>
+#include <QComboBox>
 #include <QDebug>
 
 // Helper to decode JWT claims
@@ -40,9 +41,45 @@ DeviceCodeLoginWindow::DeviceCodeLoginWindow(DashboardWindow *dashboard, QWidget
 
     QVBoxLayout *layout = new QVBoxLayout(this);
 
+    // Curated red-team-optimal client IDs. All FOCI-eligible except the last
+    // (Microsoft Graph PowerShell): a refresh token issued for any FOCI member
+    // can be redeemed for the others without a second consent. This isn't
+    // exhaustive by design - the full first-party catalog is in
+    // helpers/apps.json for anyone who needs an obscure one, which they can
+    // paste into this same field.
+    struct ClientPreset { const char *name; const char *uuid; };
+    static const ClientPreset CLIENT_PRESETS[] = {
+        {"Microsoft Azure CLI",             "04b07795-8ddb-461a-bbee-02f9e1bf7b46"},
+        {"Microsoft Azure PowerShell",      "1950a258-227b-4e31-a9cf-717495945fc2"},
+        {"Microsoft Teams",                 "1fec8e78-bce4-4aaf-ab1b-5451cc387264"},
+        {"Microsoft Office",                "d3590ed6-52b3-4102-aeff-aad2292ab01c"},
+        {"Visual Studio Code",              "aebc6443-996d-45c2-90f0-388ff96faa56"},
+        {"Microsoft Intune Company Portal", "9ba1a5c7-f17a-4de9-a1f1-6178c8d51223"},
+        {"Microsoft Authenticator",         "4813382a-8fa7-425e-ab75-3b753aab3abb"},
+        {"Microsoft Outlook Mobile",        "27922004-5251-4030-b22d-91ecd9a37ea4"},
+        {"OneDrive SyncEngine",             "ab9b8c07-8f02-4f72-87fa-80105867a763"},
+        {"Microsoft Graph PowerShell",      "14d82eec-204b-4c2f-b7e8-296a70dab67e"},
+    };
+
     layout->addWidget(new QLabel("Client ID"));
-    clientId = new QLineEdit();
-    clientId->setPlaceholderText("e.g., 1950a258-227b-4e31-a9cf-717495945fc2 (Azure PowerShell)");
+    clientId = new QComboBox();
+    clientId->setEditable(true);
+    clientId->setInsertPolicy(QComboBox::NoInsert);  // typed text goes to the request, not the list
+    clientId->lineEdit()->setPlaceholderText(
+        "Pick a curated app or paste a client ID (e.g. 1950a258-227b-4e31-a9cf-717495945fc2)");
+    for (const auto &p : CLIENT_PRESETS) {
+        // "Name — uuid" in the list, uuid in itemData; on pick we swap the
+        // edit line to just the uuid so downstream code sees a raw ID.
+        clientId->addItem(QString("%1  —  %2").arg(p.name, p.uuid), QString(p.uuid));
+    }
+    // No preselection — leave the field blank so the operator makes an explicit choice.
+    clientId->setCurrentIndex(-1);
+    // When the user picks a preset, replace the visible text with just the UUID.
+    connect(clientId, QOverload<int>::of(&QComboBox::activated), this, [this](int idx) {
+        if (idx < 0) return;
+        const QString uuid = clientId->itemData(idx).toString();
+        if (!uuid.isEmpty()) clientId->lineEdit()->setText(uuid);
+    });
     layout->addWidget(clientId);
 
     layout->addWidget(new QLabel("Resource (Scope / Audience)"));
@@ -101,7 +138,7 @@ void DeviceCodeLoginWindow::performDeviceCodeLogin() {
     }
 
     // Validate inputs
-    QString clientIdText = clientId->text().trimmed();
+    QString clientIdText = clientId->currentText().trimmed();
     if (clientIdText.isEmpty()) {
         QMessageBox::warning(this, "Missing Client ID",
             "Please enter a Client ID.\n\nCommon options:\n"
@@ -117,17 +154,24 @@ void DeviceCodeLoginWindow::performDeviceCodeLogin() {
     QString fullScope = resourceInput->text().trimmed();
     QString additionalScopes = additionalScopesInput->text().trimmed();
 
-    // Known first-party Microsoft client IDs that don't support dynamic consent
+    // Known first-party Microsoft client IDs that don't support dynamic consent.
+    // Kept in sync with the curated CLIENT_PRESETS dropdown above plus a few
+    // extras (SharePoint, Bing, OfficeHome/Authenticator, Graph PowerShell)
+    // that operators sometimes paste in as free text.
     static const QStringList firstPartyClientIds = {
-        "1950a258-227b-4e31-a9cf-717495945fc2",  // Azure PowerShell
-        "d3590ed6-52b3-4102-aeff-aad2292ab01c",  // Microsoft Office
-        "1fec8e78-bce4-4aaf-ab1b-5451cc387264",  // Microsoft Teams
         "04b07795-8ddb-461a-bbee-02f9e1bf7b46",  // Azure CLI
-        "4765445b-32c6-49b0-83e6-1d93765276ca",  // OfficeHome/Authenticator
-        "d326c1ce-6cc6-4de2-bebc-4591e5e13ef0",  // SharePoint
-        "ab9b8c07-8f02-4f72-87fa-80105867a763",  // OneDrive SyncEngine
-        "2d7f3606-b07d-41d1-b9d2-0d0c9296a6e8",  // Microsoft Bing Search
+        "1950a258-227b-4e31-a9cf-717495945fc2",  // Azure PowerShell
+        "1fec8e78-bce4-4aaf-ab1b-5451cc387264",  // Microsoft Teams
+        "d3590ed6-52b3-4102-aeff-aad2292ab01c",  // Microsoft Office
+        "aebc6443-996d-45c2-90f0-388ff96faa56",  // Visual Studio Code
+        "9ba1a5c7-f17a-4de9-a1f1-6178c8d51223",  // Intune Company Portal
+        "4813382a-8fa7-425e-ab75-3b753aab3abb",  // Microsoft Authenticator
         "27922004-5251-4030-b22d-91ecd9a37ea4",  // Outlook Mobile
+        "ab9b8c07-8f02-4f72-87fa-80105867a763",  // OneDrive SyncEngine
+        "14d82eec-204b-4c2f-b7e8-296a70dab67e",  // Microsoft Graph PowerShell
+        "4765445b-32c6-49b0-83e6-1d93765276ca",  // OfficeHome/Authenticator (web)
+        "d326c1ce-6cc6-4de2-bebc-4591e5e13ef0",  // SharePoint
+        "2d7f3606-b07d-41d1-b9d2-0d0c9296a6e8",  // Microsoft Bing Search
     };
 
     bool isFirstParty = firstPartyClientIds.contains(clientIdText.toLower());
@@ -169,7 +213,7 @@ void DeviceCodeLoginWindow::performDeviceCodeLogin() {
 
     QThread *thread = new QThread();
     DeviceCodeWorker *worker = new DeviceCodeWorker(
-        clientId->text(), fullScope, uaInput->text(), id
+        clientId->currentText(), fullScope, uaInput->text(), id
     );
     worker->moveToThread(thread);
 
