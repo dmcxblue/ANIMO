@@ -1124,20 +1124,27 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             return true;
         }
 
-        // --- FULL SESSION via DEVICE CODE (Connect-AzAccount -UseDeviceAuthentication) ---
-        // Interactive device-code login run INSIDE Az, so the context keeps a real token
-        // cache + refresh token. Data-plane cmdlets (Get-AzKeyVaultSecret, storage, etc.)
-        // then work natively - unlike -AccessToken sessions. No username/password needed.
+        // --- FULL SESSION via DEVICE CODE (MSAL, seamless az cli + Az PS) ---
+        // ONE device code prompt logs in BOTH az cli and Az PowerShell. Delegates the
+        // actual MSAL device flow to animo_device_code.py (extracted next to the
+        // pwsh shim below); the shim then bootstraps Az PS with the resulting AT +
+        // FOCI-minted per-resource tokens. See server/scripts/login_azure_devicecode.ps1.
         if (mode == QStringLiteral("az_devicecode")) {
             QByteArray script = loadScript(":/scripts/login_azure_devicecode.ps1");
             if (script.isEmpty()) {
                 sendTo(sock, Protocol::err("failed to load device-code login script"));
                 return true;
             }
+            QByteArray helper = loadScript(":/scripts/animo_device_code.py");
+            if (helper.isEmpty()) {
+                sendTo(sock, Protocol::err("failed to load MSAL device-code helper"));
+                return true;
+            }
 
             QString appDir = QCoreApplication::applicationDirPath();
             QDir().mkpath(QString("%1/data/sessions/%2").arg(appDir, sid));
-            const QString ps1Path = QString("%1/data/sessions/%2/login.ps1").arg(appDir, sid);
+            const QString ps1Path    = QString("%1/data/sessions/%2/login.ps1").arg(appDir, sid);
+            const QString helperPath = QString("%1/data/sessions/%2/animo_device_code.py").arg(appDir, sid);
 
             QFile f(ps1Path);
             if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -1146,6 +1153,18 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
             }
             f.write(script);
             f.close();
+
+            QFile fh(helperPath);
+            if (!fh.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                sendTo(sock, Protocol::err("failed to create MSAL helper script"));
+                return true;
+            }
+            fh.write(helper);
+            fh.close();
+            // 0600 so the token cache path passed on argv isn't world-readable via
+            // the helper script itself (it doesn't contain secrets, but keep it
+            // consistent with how the pwsh shim treats sensitive files).
+            QFile(helperPath).setPermissions(QFile::ReadOwner | QFile::WriteOwner);
 
             if (!rid.isEmpty()) {
                 QMutexLocker locker(&g_stateMutex);

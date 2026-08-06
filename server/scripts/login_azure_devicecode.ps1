@@ -1,32 +1,143 @@
 param([string]$Resource='https://management.azure.com')
 $ErrorActionPreference='Stop'
-# Full interactive login: device code runs INSIDE Az, so the context keeps a real
-# token cache + refresh token. Unlike -AccessToken, this lets Get-AzAccessToken mint
-# any resource (KeyVault, Storage, Graph) on demand -> data-plane cmdlets work.
-# The "enter the code XXXX" prompt is written to the warning/info streams; merge them
-# to output so it streams live to the Session Tab.
-try {
-    # Clean context first so a stale persisted AccessToken login can't shadow this one.
-    Disconnect-AzAccount -EA SilentlyContinue|Out-Null
-    Clear-AzContext -Force -EA SilentlyContinue|Out-Null
-    Connect-AzAccount -UseDeviceAuthentication -WA Continue -InformationAction Continue *>&1 |
-        ForEach-Object { Write-Output $_ }
-    $ctx=Get-AzContext -EA SilentlyContinue
-    if($ctx-and$ctx.Account){
-        try{$t=(Get-AzAccessToken -ResourceUrl $Resource -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
-        # az cli is a separate binary with its own token cache. For device-code
-        # login we deliberately don't call `az login` here - it would prompt the
-        # operator for a SECOND device code, which is confusing. If they need az
-        # cli in the same session, they can run the printed one-liner.
-        try {
-            if (Get-Command az -EA SilentlyContinue) {
-                Write-Output "[Animo] To use az cli in this session run:  az login --use-device-code --tenant $($ctx.Tenant.Id)"
-                Write-Output "[Animo] Then:  az account get-access-token --resource $Resource"
-            }
-        } catch {}
-        Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"
+
+# ANIMO device-code login (seamless).
+#
+# ONE device code prompt gets you both az cli AND Az PowerShell logged in.
+# A helper Python script (animo_device_code.py, extracted next to this script
+# by the server) runs a real MSAL device flow using the Azure CLI client id
+# (which is FOCI-eligible), populates $AZURE_CONFIG_DIR/msal_token_cache.json
+# so `az` commands work, and hands the resulting AT/RT + FOCI-minted resource
+# tokens back to us over stdout as one JSON line. We then bootstrap Az PS via
+# Connect-AzAccount -AccessToken (+ GraphAccessToken / KeyVaultAccessToken)
+# so Get-AzKeyVaultSecret, storage cmdlets, etc. work natively without a
+# second prompt.
+#
+# The old flow (Connect-AzAccount -UseDeviceAuthentication) is gone: it never
+# managed to log az cli in without prompting the operator for a second device
+# code, and its Get-AzAccessToken call silently broke on Az PS 12+ (SecureString).
+
+$helperPath = Join-Path $PSScriptRoot 'animo_device_code.py'
+if (-not (Test-Path $helperPath)) {
+    Write-Output "__ANIMO_LOGIN_FAIL__:MSAL helper missing at $helperPath"
+    return
+}
+
+$py = $env:ANIMO_PYTHON
+if ($py) {
+    if (-not (Get-Command $py -EA SilentlyContinue)) {
+        Write-Output "__ANIMO_LOGIN_FAIL__:ANIMO_PYTHON points to '$py' which is not on PATH"
+        return
     }
-    else{Write-Output "__ANIMO_LOGIN_FAIL__:No context after device-code login"}
+} elseif (Get-Command python3 -EA SilentlyContinue) {
+    $py = 'python3'
+} elseif (Get-Command python -EA SilentlyContinue) {
+    $py = 'python'
+} else {
+    Write-Output "__ANIMO_LOGIN_FAIL__:python3 not found on PATH (install python3 + pip3 install msal)"
+    return
+}
+
+# Verify msal is importable up-front so we can give a clean error instead of
+# waiting until after the user enters a device code.
+try {
+    $probe = (& $py -c "import msal, sys; sys.stdout.write(msal.__version__)" 2>&1)
 } catch {
-    Write-Output "__ANIMO_LOGIN_FAIL__:$($_.Exception.Message)"
+    Write-Output "__ANIMO_LOGIN_FAIL__:python probe threw: $($_.Exception.Message)"
+    return
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "__ANIMO_LOGIN_FAIL__:msal not installed for $py - run: pip3 install msal (got: $probe)"
+    return
+}
+Write-Output "[Animo] MSAL $probe ready. Starting device code flow..."
+
+# Run the helper. Stderr streams to the terminal (device code prompt + status).
+# Stdout is exactly one JSON line at the end with all tokens. We split streams
+# by redirecting stderr to stdout via 2>&1 and separating the JSON envelope
+# from the human-readable lines.
+$jsonLine = $null
+try {
+    & $py $helperPath --resource $Resource --tenant organizations 2>&1 | ForEach-Object {
+        $line = "$_"
+        # The helper's final result is a single JSON object on stdout.
+        if ($line.StartsWith('{') -and $line.Contains('"status"')) {
+            $jsonLine = $line
+        } else {
+            Write-Output $line
+        }
+    }
+} catch {
+    Write-Output "__ANIMO_LOGIN_FAIL__:MSAL helper crashed: $($_.Exception.Message)"
+    return
+}
+
+if (-not $jsonLine) {
+    Write-Output "__ANIMO_LOGIN_FAIL__:MSAL helper produced no JSON result"
+    return
+}
+
+$r = $null
+try { $r = $jsonLine | ConvertFrom-Json } catch {
+    Write-Output "__ANIMO_LOGIN_FAIL__:Malformed helper output: $($_.Exception.Message)"
+    return
+}
+if ($r.status -ne 'success') {
+    $msg = if ($r.message) { $r.message } else { 'unknown MSAL error' }
+    Write-Output "__ANIMO_LOGIN_FAIL__:$msg"
+    return
+}
+
+# Confirm az cli sees the account (the helper wrote its MSAL cache + azureProfile.json).
+try {
+    if (Get-Command az -EA SilentlyContinue) {
+        $azShow = (& az account show -o none 2>&1)
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output "[Animo] az cli is logged in as $($r.upn) (msal cache + azureProfile.json populated)"
+            try {
+                $sub = (& az account show --query id -o tsv 2>$null)
+                if ($sub) { Write-Output "[Animo] Active subscription: $sub  (switch with: az account set --subscription <id>)" }
+            } catch {}
+        } else {
+            $azErr = ($azShow | Out-String).Trim()
+            Write-Output "[Animo] az cli cache written but az account show failed: $azErr"
+        }
+    } else {
+        Write-Output "[Animo] az cli not installed; skipping az verification (Az PS still logged in below)"
+    }
+} catch {}
+
+# Bootstrap Az PowerShell with the AT (and FOCI-minted per-resource tokens).
+# Connect-AzAccount -AccessToken is limited compared to a real interactive
+# login - it can't mint fresh tokens on demand - so we pass the pre-minted
+# GraphAccessToken and KeyVaultAccessToken to cover the common data planes.
+try {
+    Disconnect-AzAccount -EA SilentlyContinue | Out-Null
+    Clear-AzContext -Force -EA SilentlyContinue | Out-Null
+
+    $connectArgs = @{
+        AccessToken   = $r.access_token
+        AccountId     = $r.upn
+        Tenant        = $r.tenant_id
+        WarningAction = 'Ignore'
+        ErrorAction   = 'Stop'
+    }
+    if ($r.graph_token)    { $connectArgs['GraphAccessToken']    = $r.graph_token }
+    if ($r.keyvault_token) { $connectArgs['KeyVaultAccessToken'] = $r.keyvault_token }
+    Connect-AzAccount @connectArgs | Out-Null
+
+    $ctx = Get-AzContext -EA SilentlyContinue
+    if ($ctx -and $ctx.Account) {
+        Write-Output "[Animo] Az PowerShell logged in as $($r.upn) (tenant $($r.tenant_id))"
+        if ($r.graph_token)    { Write-Output "[Animo] Graph AT pre-loaded (Connect-MgGraph -AccessToken ...)" }
+        if ($r.keyvault_token) { Write-Output "[Animo] Key Vault AT pre-loaded (Get-AzKeyVaultSecret works)" }
+        Write-Output "[Animo] Access Token ($Resource):"
+        Write-Output $r.access_token
+        Write-Output "__ANIMO_TOKEN__:$($r.access_token)"
+        Write-Output "__ANIMO_LOGIN_OK__:$($r.upn)"
+    } else {
+        Write-Output "__ANIMO_LOGIN_FAIL__:Az PS Connect-AzAccount produced no context"
+    }
+} catch {
+    Write-Output "__ANIMO_LOGIN_FAIL__:Az PS bootstrap failed: $($_.Exception.Message)"
 }

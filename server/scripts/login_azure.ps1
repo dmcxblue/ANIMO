@@ -11,7 +11,20 @@ try {
     Connect-AzAccount -Credential $c -EA Stop -WA Ignore|Out-Null
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
-        try{$t=(Get-AzAccessToken -ResourceUrl $Resource -EA Stop).Token;Write-Output "__ANIMO_TOKEN__:$t"}catch{}
+        # Az PS 12+ returns .Token as SecureString by default (breaking change from Az 11).
+        # Interpolating a SecureString straight into a string yields the literal
+        # "System.Security.SecureString" - so unwrap it explicitly.
+        try {
+            $tok = Get-AzAccessToken -ResourceUrl $Resource -EA Stop
+            $t = if ($tok.Token -is [System.Security.SecureString]) {
+                $tok.Token | ConvertFrom-SecureString -AsPlainText
+            } else { $tok.Token }
+            if ($t) {
+                Write-Output "[Animo] Access Token ($Resource):"
+                Write-Output $t
+                Write-Output "__ANIMO_TOKEN__:$t"
+            }
+        } catch {}
         # Also log az cli in with the same ROPC creds so operators can use az one-liners
         # in the same terminal (az cli keeps a separate token cache from Az PS).
         try {

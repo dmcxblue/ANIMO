@@ -27,7 +27,9 @@ sudo apt-get install -y --no-install-recommends \
   libqt6svg6 \
   libqt6sql6 \
   libqt6sql6-sqlite \
-  libssl-dev
+  libssl-dev \
+  python3 \
+  python3-pip
 
 # ---------------------------------------------------------------------------
 # PowerShell 7
@@ -103,6 +105,27 @@ else
     curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash || {
         echo "[!] az cli install failed - continuing without it."
         echo "    Login scripts will skip az login."
+    }
+fi
+
+# ---------------------------------------------------------------------------
+# Python MSAL (required for the seamless device-code login flow)
+#
+# server/scripts/animo_device_code.py drives one MSAL device-code prompt and
+# hands the resulting tokens to Az PS + az cli. Without msal the device-code
+# session type fails at login time.
+# ---------------------------------------------------------------------------
+
+echo "[*] Installing Python MSAL for the device-code login helper..."
+# python3-msal exists on Debian 12+ / Ubuntu 22.04+ / Kali rolling. Fall back
+# to pip if the distro doesn't package a recent enough version.
+if sudo apt-get install -y python3-msal 2>/dev/null; then
+    echo "[+] python3-msal installed via apt."
+else
+    echo "[*] python3-msal not available via apt; installing with pip3..."
+    pip3 install --user --quiet msal || {
+        echo "[!] pip3 install msal failed. Install manually before running device-code login:"
+        echo "    pip3 install msal"
     }
 fi
 

@@ -58,10 +58,22 @@ try {
 
     $ctx=Get-AzContext -EA SilentlyContinue
     if($ctx-and$ctx.Account){
-        try{
-            $tok=Get-AzAccessToken -ResourceUrl $Resource -EA SilentlyContinue
-            if($tok-and$tok.Token){Write-Output "__ANIMO_TOKEN__:$($tok.Token)"}
-        }catch{}
+        # Az PS 12+ returns .Token as SecureString by default (breaking change from Az 11).
+        # Interpolating a SecureString straight into a string yields the literal
+        # "System.Security.SecureString" - so unwrap it explicitly.
+        try {
+            $tok = Get-AzAccessToken -ResourceUrl $Resource -EA SilentlyContinue
+            if ($tok -and $tok.Token) {
+                $t = if ($tok.Token -is [System.Security.SecureString]) {
+                    $tok.Token | ConvertFrom-SecureString -AsPlainText
+                } else { $tok.Token }
+                if ($t) {
+                    Write-Output "[Animo] Access Token ($Resource):"
+                    Write-Output $t
+                    Write-Output "__ANIMO_TOKEN__:$t"
+                }
+            }
+        } catch {}
         Write-Output "__ANIMO_LOGIN_OK__:$($ctx.Account)"
     }
     else{Write-Output "__ANIMO_LOGIN_FAIL__:No context"}

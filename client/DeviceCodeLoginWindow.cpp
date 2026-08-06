@@ -459,6 +459,9 @@ void DeviceCodeLoginWindow::wireTransport() {
                         tokenInfo.accessToken = useToken;
                         tokenInfo.refreshToken = pendingRefreshToken;
                         tokenInfo.resource = fullSessionMode ? res : pendingResource;
+                        // Snapshot RT before the pending state is cleared below - the
+                        // Session Created dialog wants to display it.
+                        const QString rtForDisplay = pendingRefreshToken;
                         TokenStore::instance()->storeToken(sid, tokenInfo);
 
                         // Update dashboard
@@ -478,9 +481,23 @@ void DeviceCodeLoginWindow::wireTransport() {
                         fullSessionMode = false;
                         fullSessionSid.clear();
 
-                        QMessageBox::information(this, "Session Created",
-                            QString("%1 for %2\nTenant: %3\nSession: %4")
-                            .arg(wasFull ? "Full session created" : "Session created", user, tenantId, sid));
+                        // Show the AT in a collapsible details area so the operator
+                        // can copy it without cluttering the summary. Empty token
+                        // (rare edge case) just omits the details block.
+                        QMessageBox box(QMessageBox::Information, "Session Created",
+                            QString("%1 for %2\nTenant: %3\nSession: %4\nResource: %5")
+                            .arg(wasFull ? "Full session created" : "Session created",
+                                 user, tenantId, sid, tokenInfo.resource),
+                            QMessageBox::Ok, this);
+                        if (!useToken.isEmpty()) {
+                            box.setDetailedText(
+                                QString("Access Token (%1):\n%2\n\nRefresh Token:\n%3")
+                                    .arg(tokenInfo.resource, useToken,
+                                         rtForDisplay.isEmpty()
+                                             ? QStringLiteral("(none captured — full-session mode does not return an RT client-side)")
+                                             : rtForDisplay));
+                        }
+                        box.exec();
                         return;
                     }
 
