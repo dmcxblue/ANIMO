@@ -98,7 +98,11 @@ void AzureStorageWindow::setupUi() {
     row1->addWidget(containerInput, 1);
     row1->addWidget(new QLabel("Service:", this));
     serviceCombo = new QComboBox(this);
-    serviceCombo->addItems({"Blob", "File"});
+    serviceCombo->addItems({"Blob", "File", "Table"});
+    serviceCombo->setToolTip(
+        "Blob:  list containers, download blobs\n"
+        "File:  list shares, browse files\n"
+        "Table: list tables, dump entities (uses the same storage.azure.com token)");
     row1->addWidget(serviceCombo);
     authLayout->addLayout(row1);
 
@@ -149,8 +153,10 @@ void AzureStorageWindow::setupUi() {
     storageAccountCombo = new QComboBox(this);
     storageAccountCombo->setMinimumWidth(240);
     storageAccountCombo->setEnabled(false);
-    listContainersBtn = new QPushButton("List Containers / Shares", this);
-    listBlobsBtn = new QPushButton("List Blobs in Container", this);
+    listContainersBtn = new QPushButton("List Containers / Shares / Tables", this);
+    listContainersBtn->setToolTip("Lists containers (Blob), shares (File), or tables (Table) depending on the Service dropdown.");
+    listBlobsBtn = new QPushButton("List Blobs / Files / Entities", this);
+    listBlobsBtn->setToolTip("Uses the 'Container' field: lists blobs in a container, files in a share, or queries entities in a table.");
     StyleManager::applyPrimaryStyle(listBlobsBtn);
     checkPublicBtn = new QPushButton("Check Public Access", this);
     cancelBtn = new QPushButton("Cancel", this);
@@ -347,7 +353,11 @@ QString AzureStorageWindow::accountHost() const {
 }
 
 QString AzureStorageWindow::accountHostFor(const QString &acct) const {
-    const QString svc = serviceCombo->currentText().startsWith("File") ? "file" : "blob";
+    const QString sel = serviceCombo->currentText();
+    QString svc;
+    if      (sel.startsWith("File"))  svc = "file";
+    else if (sel.startsWith("Table")) svc = "table";
+    else                              svc = "blob";
     return QString("https://%1.%2.core.windows.net").arg(acct, svc);
 }
 
@@ -370,6 +380,14 @@ QNetworkRequest AzureStorageWindow::dataRequest(const QString &url, bool anonymo
         req = NetworkHelper::createBearerRequest(url, storageTokenInput->text().trimmed());
     }
     req.setRawHeader("x-ms-version", "2020-10-02");
+    // The Table service defaults to AtomPub XML, which nothing here parses.
+    // Ask for OData JSON without embedded metadata so the response is small and
+    // trivially serialisable. Blob/File ignore this header.
+    if (serviceCombo->currentText().startsWith("Table")) {
+        req.setRawHeader("Accept",           "application/json;odata=nometadata");
+        req.setRawHeader("DataServiceVersion", "3.0;NetFx");
+        req.setRawHeader("MaxDataServiceVersion", "3.0;NetFx");
+    }
     NetworkHelper::setRequestTimeout(req);
     return req;
 }
@@ -916,6 +934,19 @@ void AzureStorageWindow::listContainers() {
     }
     storageTree->clear();
 
+    // Tables live at <acct>.table.core.windows.net with a JSON-only API. The
+    // shared REST/PS split doesn't apply - PowerShell fallback needs Az.Storage +
+    // Get-AzStorageTable which is a separate module. Require OAuth for now.
+    const bool tableSvc = serviceCombo->currentText().startsWith("Table");
+    if (tableSvc) {
+        if (hasStorageToken()) { listTablesRest(); return; }
+        acquireStorageToken([this](bool ok) {
+            if (ok) listTablesRest();
+            else appendLog("[-] No storage.azure.com token - Tables require OAuth (Blob/File support PS fallback).", "red");
+        });
+        return;
+    }
+
     if (hasStorageToken()) { listContainersRest(); return; }
     acquireStorageToken([this](bool ok) {
         if (ok) listContainersRest();
@@ -927,15 +958,30 @@ void AzureStorageWindow::listKnownContainer() {
     currentStorageAccount = accountInput->text().trimmed();
     const QString c = containerInput->text().trimmed();
     if (currentStorageAccount.isEmpty() || c.isEmpty()) {
-        QMessageBox::warning(this, "Missing input", "Enter a storage account and a known container name.");
+        QMessageBox::warning(this, "Missing input", "Enter a storage account and a known container / share / table name.");
         return;
     }
     storageTree->clear();
     auto *item = new QTreeWidgetItem(storageTree);
     item->setText(0, c);
-    item->setText(1, serviceCombo->currentText().startsWith("File") ? "Share" : "Container");
-    item->setData(0, Qt::UserRole, "container");
+    const QString sel = serviceCombo->currentText();
+    QString kind;
+    if      (sel.startsWith("File"))  kind = "Share";
+    else if (sel.startsWith("Table")) kind = "Table";
+    else                              kind = "Container";
+    item->setText(1, kind);
+    item->setData(0, Qt::UserRole, kind == "Table" ? "table" : "container");
     storageTree->setCurrentItem(item);
+
+    if (sel.startsWith("Table")) {
+        if (hasStorageToken()) { queryTableEntitiesRest(item); return; }
+        acquireStorageToken([this, item](bool ok) {
+            if (ok) queryTableEntitiesRest(item);
+            else appendLog("[-] No storage.azure.com token - Tables require OAuth.", "red");
+        });
+        return;
+    }
+
     if (hasStorageToken()) { listBlobsRest(item); return; }
     acquireStorageToken([this, item](bool ok) {
         if (ok) listBlobsRest(item);
@@ -1040,10 +1086,21 @@ void AzureStorageWindow::listContainersPs() {
 
 void AzureStorageWindow::listChildren() {
     auto *item = storageTree->currentItem();
-    if (!item || item->data(0, Qt::UserRole).toString() != "container") return;
+    if (!item) return;
+    const QString kind = item->data(0, Qt::UserRole).toString();
 
     currentStorageAccount = accountForItem(item);
     while (item->childCount() > 0) delete item->takeChild(0);
+
+    if (kind == "table") {
+        if (hasStorageToken()) { queryTableEntitiesRest(item); return; }
+        acquireStorageToken([this, item](bool ok) {
+            if (ok) queryTableEntitiesRest(item);
+            else appendLog("[-] No storage.azure.com token - Tables require OAuth.", "red");
+        });
+        return;
+    }
+    if (kind != "container") return;
 
     if (hasStorageToken()) { listBlobsRest(item); return; }
     acquireStorageToken([this, item](bool ok) {
@@ -1156,6 +1213,114 @@ void AzureStorageWindow::listBlobsPs(QTreeWidgetItem *containerItem) {
         containerItem->setExpanded(true);
         appendLog(QString("[+] %1 item(s) (PowerShell)%2").arg(count).arg(loot ? QString(", %1 LOOT").arg(loot) : QString()),
                   loot ? "yellow" : "green");
+    });
+}
+
+// ============================================================================
+// Storage Tables (OAuth via storage.azure.com)
+// ============================================================================
+
+void AzureStorageWindow::listTablesRest() {
+    appendLog(QString("[*] Listing tables in %1 (REST)...").arg(currentStorageAccount), "cyan");
+    const QString url = accountHost() + "/Tables";
+    QNetworkReply *reply = track(net->get(dataRequest(url)));
+    if (!reply) { appendLog("[-] Failed to create request", "red"); return; }
+    setLoading(true);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        activeReplies.removeOne(reply);
+        setLoading(false);
+
+        QString err;
+        if (!NetworkHelper::isReplySuccess(reply, &err)) {
+            const int status = NetworkHelper::getHttpStatus(reply);
+            appendLog(QString("[-] REST error (%1): %2")
+                          .arg(status).arg(NetworkHelper::parseApiError(reply)), "red");
+            if (status == 403 || status == 401) {
+                appendLog("[!] Table needs Storage Table Data Reader (or higher) at the account or table scope.", "yellow");
+            }
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonArray arr = doc.object().value("value").toArray();
+        int count = 0;
+        for (const QJsonValue &v : arr) {
+            const QString name = v.toObject().value("TableName").toString();
+            if (name.isEmpty()) continue;
+            auto *item = new QTreeWidgetItem(storageTree);
+            item->setText(0, name);
+            item->setText(1, "Table");
+            item->setData(0, Qt::UserRole, "table");
+            ++count;
+        }
+        appendLog(count ? QString("[+] Found %1 table(s). Double-click one to query entities.").arg(count)
+                        : QStringLiteral("[!] No tables found (or no list permission)."),
+                  count ? "green" : "yellow");
+    });
+}
+
+void AzureStorageWindow::queryTableEntitiesRest(QTreeWidgetItem *tableItem) {
+    const QString table = tableItem->text(0);
+    // $top=1000 is Azure's server-side cap per response. Continuation tokens
+    // extend it further, which we don't implement in this first cut - most
+    // recon-target tables are well under that limit and the log dump makes it
+    // obvious when the operator hits the ceiling.
+    const QString url = QString("%1/%2()?$top=1000").arg(accountHost(), table);
+    appendLog(QString("[*] Querying entities in %1/%2 (top 1000)...").arg(currentStorageAccount, table), "cyan");
+    QNetworkReply *reply = track(net->get(dataRequest(url)));
+    if (!reply) { appendLog("[-] Failed to create request", "red"); return; }
+    setLoading(true);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, tableItem, table]() {
+        reply->deleteLater();
+        activeReplies.removeOne(reply);
+        setLoading(false);
+
+        QString err;
+        if (!NetworkHelper::isReplySuccess(reply, &err)) {
+            const int status = NetworkHelper::getHttpStatus(reply);
+            appendLog(QString("[-] REST error (%1): %2")
+                          .arg(status).arg(NetworkHelper::parseApiError(reply)), "red");
+            return;
+        }
+
+        const QByteArray body = reply->readAll();
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        const QJsonArray rows = doc.object().value("value").toArray();
+
+        // Populate tree: one child per entity, first column = "PartitionKey/RowKey",
+        // second column = compact JSON of the remaining fields. The full JSON also
+        // goes to logOutput so operators can copy the raw payload for scripting.
+        for (const QJsonValue &v : rows) {
+            QJsonObject o = v.toObject();
+            const QString pk = o.take("PartitionKey").toString();
+            const QString rk = o.take("RowKey").toString();
+            o.remove("Timestamp");
+            o.remove("odata.etag");
+
+            auto *item = new QTreeWidgetItem(tableItem);
+            item->setText(0, QString("%1 / %2").arg(pk, rk));
+            item->setText(1, "Entity");
+            item->setText(2, QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+            item->setData(0, Qt::UserRole, "entity");
+            // Loot heuristic: flag entities with values that look like creds or PII.
+            for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
+                const QString sVal = it.value().toString();
+                if (isLootName(it.key()) || isLootName(sVal)) {
+                    item->setText(4, "LOOT");
+                    for (int c = 0; c < 5; ++c)
+                        item->setForeground(c, StyleManager::colorForAuditAction("token"));
+                    break;
+                }
+            }
+        }
+        tableItem->setExpanded(true);
+        appendLog(QString("[+] %1 entity/entities returned. Full payload below:").arg(rows.size()),
+                  rows.isEmpty() ? "yellow" : "green");
+        appendLog(QString::fromUtf8(QJsonDocument(doc.object().value("value").toArray())
+                                        .toJson(QJsonDocument::Indented)), "gray");
     });
 }
 

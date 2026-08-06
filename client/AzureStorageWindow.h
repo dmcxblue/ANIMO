@@ -80,6 +80,9 @@ private:
     void listContainersPs();
     void listBlobsRest(QTreeWidgetItem *containerItem);
     void listBlobsPs(QTreeWidgetItem *containerItem);
+    // Storage Tables (OAuth via storage.azure.com).
+    void listTablesRest();
+    void queryTableEntitiesRest(QTreeWidgetItem *tableItem);
 
     void appendLog(const QString &msg, const QString &color = "white");
     void setLoading(bool loading);
