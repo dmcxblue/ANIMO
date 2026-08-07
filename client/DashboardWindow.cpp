@@ -17,6 +17,7 @@
 #include "SessionImportWindow.h"
 #include "ReportDialog.h"
 #include "ActivityWindow.h"
+#include "OperatorsWindow.h"
 #include "StyleManager.h"
 #include "RefreshTokenSprayWindow.h"
 
@@ -281,6 +282,9 @@ void DashboardWindow::initUI()
 
     QAction *activityAction = logsMenu->addAction("Activity Log");
     connect(activityAction, &QAction::triggered, this, &DashboardWindow::openActivityWindow);
+
+    QAction *operatorsAction = logsMenu->addAction("Operators");
+    connect(operatorsAction, &QAction::triggered, this, &DashboardWindow::openOperatorsWindow);
 
     QAction *tokenAnalysisAction = logsMenu->addAction("Token Lifetime Analysis");
     connect(tokenAnalysisAction, &QAction::triggered, this, &DashboardWindow::openTokenAnalysisWindow);
@@ -927,6 +931,12 @@ void DashboardWindow::openTokenLogWindow() {
 void DashboardWindow::openActivityWindow() {
     auto *win = new ActivityWindow();
     WindowHelper::setupWindow(win, this, 950, 600, 700, 400);
+    win->show();
+}
+
+void DashboardWindow::openOperatorsWindow() {
+    auto *win = new OperatorsWindow();
+    WindowHelper::setupWindow(win, this, 760, 420, 560, 300);
     win->show();
 }
 

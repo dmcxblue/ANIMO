@@ -2082,6 +2082,46 @@ bool Server::handleLine(QTcpSocket *sock, const QByteArray &line) {
         return true;
     }
 
+    // Operator roster: historical logins from audit_log + live online flag from
+    // the current socket table. Used by the Operators window (Logs menu).
+    if (action == Protocol::ACTION_LIST_OPERATORS) {
+        QJsonArray roster = SessionDBManager::instance().getOperatorRoster();
+
+        // Snapshot live operators once so we don't hold operatorBySocket_ while
+        // we mutate the roster array.
+        QSet<QString> online;
+        for (auto it = operatorBySocket_.constBegin(); it != operatorBySocket_.constEnd(); ++it)
+            online.insert(it.value());
+
+        for (int i = 0; i < roster.size(); ++i) {
+            QJsonObject o = roster.at(i).toObject();
+            o.insert("online", online.contains(o.value("operator").toString()));
+            roster.replace(i, o);
+        }
+
+        // Also include any online operators the audit_log doesn't yet know about
+        // (edge case: their login row was rolled back or the DB was cleared).
+        QSet<QString> known;
+        for (const QJsonValue &v : std::as_const(roster))
+            known.insert(v.toObject().value("operator").toString());
+        for (const QString &op : std::as_const(online)) {
+            if (known.contains(op)) continue;
+            QJsonObject o;
+            o.insert("operator",   op);
+            o.insert("firstSeen",  QString());
+            o.insert("lastSeen",   QString());
+            o.insert("loginCount", 0);
+            o.insert("lastIp",     QString());
+            o.insert("online",     true);
+            roster.append(o);
+        }
+
+        QJsonObject resp = Protocol::ok("operators retrieved");
+        resp.insert("operators", roster);
+        sendTo(sock, resp);
+        return true;
+    }
+
     // ── Import Session (from encrypted backup) ────────────────────────────────
     if (action == Protocol::ACTION_IMPORT_SESSION) {
         QString sessionId = obj.value("sessionId").toString().trimmed();

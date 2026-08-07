@@ -127,6 +127,7 @@ public slots:
     void openRefreshTokenSpray();
     void openTokenLogWindow();
     void openActivityWindow();
+    void openOperatorsWindow();
     void openTokenAnalysisWindow();
     void openSessionTimelineWindow();
     void openReportDialog();

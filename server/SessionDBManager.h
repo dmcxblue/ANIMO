@@ -43,6 +43,11 @@ public:
                   const QString &target = QString(), const QString &detail = QString());
     QJsonArray getAuditLog(int limit = 500);
 
+    // Operator roster derived from audit_log's 'login' rows. Returns one entry
+    // per distinct operator: {operator, firstSeen, lastSeen, loginCount, lastIp}.
+    // The 'online' flag is added by the server (needs live socket state).
+    QJsonArray getOperatorRoster();
+
     void insertCommandOutput(const QString &sessionId,
                              const QString &command,
                              const QString &output,

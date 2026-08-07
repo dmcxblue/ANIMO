@@ -17,6 +17,7 @@ static const char* ACTION_DELETE_TOKEN   = "delete_token";
 static const char* ACTION_GET_REPORT_DATA = "get_report_data";
 static const char* ACTION_MFA_REQUIRED   = "mfa_required";
 static const char* ACTION_IMPORT_SESSION = "import_session";  // Import session metadata
+static const char* ACTION_LIST_OPERATORS = "list_operators";  // Operator roster (audit_log 'login' rows + live sockets)
 
 // Fields
 static const char* F_ACTION   = "action";

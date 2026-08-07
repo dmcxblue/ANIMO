@@ -266,6 +266,44 @@ QSqlDatabase SessionDBManager::mainDb() const {
     return m_mainDb;
 }
 
+QJsonArray SessionDBManager::getOperatorRoster()
+{
+    QMutexLocker locker(&m_mutex);
+    QJsonArray arr;
+    if (!initMainDB()) return arr;
+
+    // 'login' rows have the client IP in `target` (see handleLogin), so
+    // MAX(id)'s target gives us the most recent IP for each operator. Using
+    // MAX(id) instead of MAX(timestamp) picks a single deterministic winner
+    // when two logins landed in the same second.
+    QSqlQuery q(m_mainDb);
+    if (!q.exec(
+        "SELECT operator,"
+        "       MIN(timestamp) AS first_seen,"
+        "       MAX(timestamp) AS last_seen,"
+        "       COUNT(*)       AS login_count,"
+        "       (SELECT target FROM audit_log AS a2"
+        "          WHERE a2.operator = a1.operator AND a2.action = 'login'"
+        "          ORDER BY id DESC LIMIT 1) AS last_ip"
+        "  FROM audit_log AS a1"
+        " WHERE action = 'login'"
+        " GROUP BY operator"
+        " ORDER BY last_seen DESC"
+    )) {
+        return arr;
+    }
+    while (q.next()) {
+        QJsonObject o;
+        o.insert("operator",   q.value(0).toString());
+        o.insert("firstSeen",  q.value(1).toString());
+        o.insert("lastSeen",   q.value(2).toString());
+        o.insert("loginCount", q.value(3).toInt());
+        o.insert("lastIp",     q.value(4).toString());
+        arr.append(o);
+    }
+    return arr;
+}
+
 bool SessionDBManager::addSessionToMainDB(const QString &sessionId,
                                           const QString &user,
                                           const QString &tenantId,
